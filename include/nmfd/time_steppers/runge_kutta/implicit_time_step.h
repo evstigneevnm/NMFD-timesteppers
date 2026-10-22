@@ -69,6 +69,7 @@ public:
         "DIRK requires problem-owned previous_state/known_rhs and a complete stage linearization"
     );
 
+    // Select the named Butcher table from p.method and delegate construction.
     implicit_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
         std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, const params &p = {}
@@ -80,6 +81,8 @@ public:
     {
     }
 
+    // Validate a nonzero-diagonal DIRK table, allocate reusable workspace,
+    // and bind the nonlinear solver to the problem.
     implicit_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
         std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, butcher_table table,
@@ -120,6 +123,7 @@ public:
         solver_->set_nonlinear_operator( problem_ );
     }
 
+    // Set the starting time for the next step; requires no pending candidate.
     void set_time( scalar_type time )
     {
         require_finalized();
@@ -128,6 +132,7 @@ public:
         time_ = time;
     }
 
+    // Set the endpoint limit used to clip the next step, forward or backward.
     void set_target_time( scalar_type target )
     {
         require_finalized();
@@ -136,23 +141,29 @@ public:
         target_ = target;
     }
 
+    // Return the signed step size used by the most recent numerical attempt.
     scalar_type get_dt() const
     {
         return dt_;
     }
+    // Return the current lifecycle or numerical-result status.
     single_step_status get_status() const
     {
         return status_;
     }
+    // Return the number of trial steps attempted by the latest apply().
     unsigned int get_attempts() const
     {
         return attempts_;
     }
+    // Return the selected Butcher table without copying its coefficients.
     const butcher_table &table() const
     {
         return table_;
     }
 
+    // Clear adaptation history, discard any pending candidate, and restore idle.
+    // Keep the configured time, target, dependencies, and allocated workspace.
     void reset()
     {
         adaptation_->reset();
@@ -162,6 +173,9 @@ public:
         status_                 = single_step_status::idle;
     }
 
+    // Compute and assess a candidate, retrying rejected attempts within the budget.
+    // Publish out only on success; numerical failure leaves it unchanged.
+    // Success requires finalize() before another step; time is not advanced here.
     void apply( const vector_type &in, vector_type &out )
     {
         require_finalized();
@@ -223,6 +237,9 @@ public:
         status_ = single_step_status::attempt_limit_reached;
     }
 
+    // Report the external-processing outcome and actual committed endpoint
+    // to adaptation, then release the pending candidate. The integrator owns
+    // state commitment and time advancement; this method does not copy state.
     void finalize( adaptation_status outcome, scalar_type committed_time, const vector_type &state )
     {
         if ( !pending_ )
@@ -251,12 +268,16 @@ private:
     bool                                stiffly_accurate_ = false, initialized_ = false, pending_ = false;
     single_step_status                  status_ = single_step_status::idle;
 
+    // Reject operations that would overwrite an unfinalized candidate.
     void require_finalized() const
     {
         if ( pending_ )
             throw std::logic_error( "Finalize the pending DIRK step first" );
     }
 
+    // Perform one DIRK attempt: assemble stage references, times, and shifts,
+    // solve the coupled stage residuals, and reconstruct the endpoint in work_.
+    // Return false with a numerical failure status; do not assess or commit.
     bool compute( const vector_type &in )
     {
         auto &previous = problem_->previous_state();
