@@ -1,0 +1,3 @@
+# Use the library's own formatting policy instead of the parent's contrib exclusion.
+build/**
+contrib/**

@@ -90,9 +90,92 @@ Coefficient sources: [SSP embedded pairs](https://imrefekete.web.elte.hu/files/2
 [Dormand-Prince method](https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.RK45.html).
 Rooted-tree tests check nonlinear order, not just a scalar stability polynomial.
 
-This pass does not implement implicit/IMEX stepping.
+IMEX stepping is not implemented yet.
 Adaptive initialization uses the configured initial step and bounded rejection,
 not an extra initial derivative evaluation.
+
+## Implicit RK
+
+`runge_kutta/implicit_time_step.h` executes any lower-triangular RK table with
+nonzero diagonal stages, including IE, IM, SDIRK2(1)2, SDIRK3(1)3, and user-supplied
+DIRK tables. The constructor accepts a method name through `params`, or a
+`butcher_table` directly. Coupled IRK and zero-diagonal stages (CN/ESDIRK) are
+rejected in this implementation.
+
+The problem owns `previous_state()` and `known_rhs()` buffers and supplies:
+
+```cpp
+void set_time(scalar_type time);
+void set_affine_shift(scalar_type alpha);
+void apply(const vector_type& state, vector_type& residual);
+void set_linearization_point(const vector_type& state);
+std::shared_ptr<const jacobi_operator_type> get_jacobi_operator();
+```
+
+The buffers have mutable and const reference accessors and must not alias one
+another, caller states, or solver scratch. The residual is
+`alpha*M(t,u)*(u-previous)-f(t,u)-known_rhs`. Its Jacobian includes derivatives of
+a state-dependent mass. Trial residual calls must not alter frozen Jacobian data.
+
+For stage i the stepper writes `previous=u_n+h*sum(a_ij*k_j)` and `known_rhs=0`,
+then sets `alpha=1/(h*a_ii)` and `time=t_n+c_i*h`. The supplied nonlinear solver is
+bound once through `set_nonlinear_operator(problem)` and called with
+`solve(stage_state)`. It must not be rebound or shared between concurrent
+trajectories. No Newton headers are needed by the stepper itself.
+
+There is no mass inversion. For singular-mass DAEs, provide consistent initial
+data and a suitable coupled stage solver/preconditioner. The tests use stiffly
+accurate methods, committing the final stage directly to preserve its algebraic
+constraints. The DAE regressions include a nonlinear index-1 system and a small
+index-2 Stokes saddle system with a pressure multiplier. Other DIRK formulas are
+not automatically appropriate for every DAE.
+An external manager modifying a DAE endpoint must preserve/reconstruct consistency.
+
+The stepper owns one stage-state vector and s-1 rates for stiffly accurate methods,
+or s rates otherwise. It allocates no embedded-error or dense-output buffers.
+Scratch is reused across stages and trajectories; `apply()` publishes only a
+successful candidate. The existing integrator commits through `finalize()`.
+Failed solves report `failed_solver`; custom adaptation may retry via
+`reject_step(dt)`, without assessing invalid candidates. Constant adaptation stops.
+Configuration/backend exceptions propagate unchanged. Roundoff-close final steps
+are clipped to the target to avoid an unresolved extra Newton solve.
+
+This stage uses constant-step adaptation. Embedded-error controllers report
+`error_estimate_unavailable`; implicit dense output and adaptive estimation are
+deferred. The existing explicit implementation and interfaces are unchanged.
+
+```sh
+make -j2 test_implicit_cpu
+make -j2 test_implicit_cuda CUDA_ARCH=75
+```
+
+These tests additionally use sibling `../nmfd-newton` and `../nmfd-linsolvers`
+checkouts (override `NMFD_NEWTON_ROOT` and `NMFD_LINSOLVERS_ROOT`). Default explicit
+test targets still require neither solver library. Parent CI runs separate jobs
+for DIRK order, mass/DAE, lifecycle, Lorenz, Rossler, and regular/stiff Van der Pol
+on CPU/OpenMP and capability-gated CUDA.
+
+## Non-Autonomous Verification
+
+`test_explicit_nonautonomous.cpp` and `test_implicit_nonautonomous.cpp` use shared
+analytical scalar models from `nonautonomous_test_problems.h`:
+
+- `u'=t*u`, exact `exp(t*t/2)`: time-dependent RHS/Jacobian coefficients.
+- `(1+t)*u'=-u`, exact `1/(1+t)`: explicitly time-dependent positive mass.
+- `u'=-kappa*(u-sin(t))+cos(t)`, exact `sin(t)`: regular and stiff forcing.
+
+The tests start at t=0.25, refine three step sizes, and repeat each trajectory.
+Explicit tests audit every stage time and keep `h*kappa<=0.5` for stiff tracking.
+Implicit tests check Jacobians at multiple times/shifts and include kappa=10000.
+Classical order is checked above numerical roundoff/solve-error floors; stiff-limit
+tracking checks accuracy and refinement without assuming uniform classical order.
+
+`test_implicit_mass_dae.cpp` additionally verifies the time-dependent mass and
+`x'=-x-z+sin(t)*x`, `0=z-sin(t)*x`. The exact constrained state is
+`(exp(-t),exp(-t)*sin(t))`; external management checks the moving constraint at
+accepted endpoints, including repeated trajectories starting at t=0.25.
+Each new ODE test has separate parent CPU/OpenMP and capability-gated CUDA jobs.
+The sanitizer job also includes both non-autonomous test executables.
 
 ## FSAL Reuse
 
