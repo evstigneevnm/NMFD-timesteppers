@@ -1,6 +1,7 @@
 #ifndef NMFD_TIME_STEPPERS_TESTS_IMPLICIT_SUPPORT_H
 #define NMFD_TIME_STEPPERS_TESTS_IMPLICIT_SUPPORT_H
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -42,6 +43,27 @@ inline void require( bool condition, const char *message )
 {
     if ( !condition )
         throw std::runtime_error( message );
+}
+
+struct stage_scaling
+{
+    double mass, rhs;
+};
+
+// Differential rows only: evaluate a*M*(u-previous)-b*(f+known_rhs) directly.
+// The problem freezes these coefficients for the whole nonlinear stage solve.
+inline stage_scaling balanced_stage_scaling( double alpha, double reference_time = 1 )
+{
+    if ( !std::isfinite( alpha ) || !std::isfinite( reference_time ) || reference_time <= 0 )
+        throw std::invalid_argument( "Stage shift must be finite and reference time positive and finite" );
+    const auto inverse_time = 1 / reference_time;
+    if ( !std::isfinite( inverse_time ) || inverse_time <= 0 )
+        throw std::invalid_argument( "Stage reference inverse time is not representable" );
+    const auto          scale = std::max( std::abs( alpha ), inverse_time );
+    const stage_scaling result{ alpha / scale, 1 / scale };
+    if ( !std::isfinite( result.rhs ) || result.rhs <= 0 )
+        throw std::invalid_argument( "Stage RHS scale is not representable" );
+    return result;
 }
 
 template <class Mapping>
@@ -101,8 +123,9 @@ public:
     double       time = 0, alpha = 0;
     unsigned int linearizations = 0;
 
-    explicit stage_problem( std::shared_ptr<operations_type> operations, Equation e = {} )
-        : equation( e ), operations_( std::move( operations ) ), previous_( *operations_ ), rhs_( *operations_ ),
+    explicit stage_problem( std::shared_ptr<operations_type> operations, Equation e = {}, double reference_time = 1 )
+        : equation( e ), reference_time_( reference_time ), scaling_( balanced_stage_scaling( 0, reference_time ) ),
+          operations_( std::move( operations ) ), previous_( *operations_ ), rhs_( *operations_ ),
           jacobi_( std::make_shared<jacobi_operator_type>() )
     {
         require( operations_->size() == Equation::size, "Implicit test problem dimension mismatch" );
@@ -115,7 +138,13 @@ public:
     }
     void set_affine_shift( double value )
     {
-        alpha = value;
+        const auto updated = balanced_stage_scaling( value, reference_time_ );
+        alpha              = value;
+        scaling_           = updated;
+    }
+    const stage_scaling &scaling() const
+    {
+        return scaling_;
     }
     vector_type &previous_state()
     {
@@ -137,24 +166,25 @@ public:
     struct mapping
     {
         Equation            equation;
-        double              time, alpha;
+        double              time;
+        stage_scaling       scaling;
         vector_type         state, previous, rhs, out;
         __DEVICE_TAG__ void operator()( std::ptrdiff_t ) const
         {
             auto result = out;
-            equation.residual( time, alpha, state, previous, rhs, result );
+            equation.residual( time, scaling, state, previous, rhs, result );
         }
     };
     void apply( const vector_type &state, vector_type &out ) const
     {
-        execute_small_mapping( mapping{ equation, time, alpha, state, *previous_, *rhs_, out } );
+        execute_small_mapping( mapping{ equation, time, scaling_, state, *previous_, *rhs_, out } );
     }
     void set_linearization_point( const vector_type &state )
     {
         state_type x, previous;
         operations_->get( state, x.d, Equation::size );
         operations_->get( *previous_, previous.d, Equation::size );
-        jacobi_->matrix = equation.jacobian( time, alpha, x, previous );
+        jacobi_->matrix = equation.jacobian( time, scaling_, x, previous );
         ++linearizations;
     }
     std::shared_ptr<const jacobi_operator_type> get_jacobi_operator() const
@@ -163,6 +193,8 @@ public:
     }
 
 private:
+    double                                reference_time_;
+    stage_scaling                         scaling_;
     std::shared_ptr<operations_type>      operations_;
     vector_wrap_type                      previous_, rhs_;
     std::shared_ptr<jacobi_operator_type> jacobi_;
@@ -208,17 +240,21 @@ struct scalar_time_equation : Equation
     {
     }
     __DEVICE_TAG__ void residual(
-        double t, double alpha, const vector_type &x, const vector_type &previous, const vector_type &rhs,
-        vector_type &out
+        double t, const stage_scaling &scaling, const vector_type &x, const vector_type &previous,
+        const vector_type &rhs, vector_type &out
     ) const
     {
-        out( 0 ) = alpha * this->mass( t ) * ( x( 0 ) - previous( 0 ) ) - this->rhs( t, x( 0 ) ) - rhs( 0 );
+        out( 0 ) = scaling.mass * this->mass( t ) * ( x( 0 ) - previous( 0 ) ) -
+                   scaling.rhs * ( this->rhs( t, x( 0 ) ) + rhs( 0 ) );
     }
     auto jacobian(
-        double t, double alpha, const scfd::static_vec::vec<double, 1> &x, const scfd::static_vec::vec<double, 1> &
+        double t, const stage_scaling &scaling, const scfd::static_vec::vec<double, 1> &x,
+        const scfd::static_vec::vec<double, 1> &
     ) const
     {
-        return scfd::static_mat::mat<double, 1, 1>{ alpha * this->mass( t ) - this->rhs_derivative( t, x[0] ) };
+        return scfd::static_mat::mat<double, 1, 1>{
+            scaling.mass * this->mass( t ) - scaling.rhs * this->rhs_derivative( t, x[0] )
+        };
     }
 };
 

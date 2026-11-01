@@ -22,6 +22,21 @@ namespace runge_kutta
 {
 namespace detail
 {
+template <class Adaptation, class Vector, class T, class = void>
+struct has_embedded_assessment : std::false_type
+{
+};
+
+template <class Adaptation, class Vector, class T>
+struct has_embedded_assessment<
+    Adaptation, Vector, T,
+    std::void_t<decltype( std::declval<Adaptation &>().assess(
+        std::declval<T>(), std::declval<T>(), std::declval<const Vector &>(), std::declval<const Vector &>(),
+        std::declval<T &>(), std::declval<unsigned int>(), std::declval<const Vector *>()
+    ) )>> : std::true_type
+{
+};
+
 template <class Problem, class Vector, class T, class = void>
 struct has_implicit_stage_interface : std::false_type
 {
@@ -96,7 +111,7 @@ public:
               adaptation ? std::move( adaptation ) : throw std::invalid_argument( "DIRK requires time adaptation" )
           ),
           solver_( solver ? std::move( solver ) : throw std::invalid_argument( "DIRK requires a nonlinear solver" ) ),
-          params_( p ), table_( std::move( table ) ), work_( *operations_ )
+          params_( p ), table_( std::move( table ) ), work_( *operations_ ), error_( *operations_ )
     {
         if ( p.maximum_attempts == 0 )
             throw std::invalid_argument( "Empty DIRK attempt budget" );
@@ -113,8 +128,18 @@ public:
             stiffly_accurate_ = stiffly_accurate_ && table_.a( table_.size() - 1, i ) == table_.b( i );
         work_.init();
         work_.start_use();
-        rates_.reserve( table_.size() - ( stiffly_accurate_ ? 1 : 0 ) );
-        for ( std::size_t i = 0; i < table_.size() - ( stiffly_accurate_ ? 1 : 0 ); ++i )
+        if constexpr ( detail::has_embedded_assessment<TimeStepAdaptation, vector_type, scalar_type>::value )
+            estimate_error_ = adaptation_->requires_error_estimate() && table_.is_embedded();
+        if ( estimate_error_ )
+        {
+            error_.init();
+            error_.start_use();
+        }
+        const bool omit_endpoint_rate =
+            stiffly_accurate_ && ( !estimate_error_ || table_.error_b( table_.size() - 1 ) == 0 );
+        const auto rate_count = table_.size() - ( omit_endpoint_rate ? 1 : 0 );
+        rates_.reserve( rate_count );
+        for ( std::size_t i = 0; i < rate_count; ++i )
         {
             rates_.emplace_back( *operations_ );
             rates_.back().init();
@@ -180,7 +205,7 @@ public:
     {
         require_finalized();
         attempts_ = 0;
-        if ( adaptation_->requires_error_estimate() )
+        if ( adaptation_->requires_error_estimate() && !estimate_error_ )
         {
             status_ = single_step_status::error_estimate_unavailable;
             return;
@@ -219,7 +244,7 @@ public:
                 continue;
             }
             scalar_type next_dt  = proposed;
-            const auto  decision = adaptation_->assess( time_, dt_, in, *work_, next_dt );
+            const auto  decision = assess( in, next_dt );
             if ( decision == adaptation_status::accepted )
             {
                 operations_->assign( *work_, out );
@@ -261,11 +286,12 @@ private:
     std::shared_ptr<NonlinearSolver>    solver_;
     params                              params_;
     butcher_table                       table_;
-    vector_wrap_type                    work_;
+    vector_wrap_type                    work_, error_;
     std::vector<vector_wrap_type>       rates_;
     scalar_type                         time_ = 0, target_ = 1, dt_ = 0;
     unsigned int                        attempts_         = 0;
-    bool                                stiffly_accurate_ = false, initialized_ = false, pending_ = false;
+    bool                                stiffly_accurate_ = false, estimate_error_ = false;
+    bool                                initialized_ = false, pending_ = false;
     single_step_status                  status_ = single_step_status::idle;
 
     // Reject operations that would overwrite an unfinalized candidate.
@@ -273,6 +299,15 @@ private:
     {
         if ( pending_ )
             throw std::logic_error( "Finalize the pending DIRK step first" );
+    }
+
+    // Keep error-free custom controllers compatible with the five-argument assessment.
+    adaptation_status assess( const vector_type &in, scalar_type &next_dt )
+    {
+        if constexpr ( detail::has_embedded_assessment<TimeStepAdaptation, vector_type, scalar_type>::value )
+            if ( estimate_error_ )
+                return adaptation_->assess( time_, dt_, in, *work_, next_dt, table_.error_order(), &*error_ );
+        return adaptation_->assess( time_, dt_, in, *work_, next_dt );
     }
 
     // Perform one DIRK attempt: assemble stage references, times, and shifts,
@@ -337,6 +372,18 @@ private:
         {
             status_ = single_step_status::failed_nonfinite;
             return false;
+        }
+        if ( estimate_error_ )
+        {
+            operations_->assign_scalar( scalar_type( 0 ), *error_ );
+            for ( std::size_t i = 0; i < rates_.size(); ++i )
+                if ( table_.error_b( i ) != 0 )
+                    operations_->add_lin_comb( dt_ * scalar_type( table_.error_b( i ) ), *rates_[i], *error_ );
+            if ( !operations_->is_valid_number( *error_ ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
         }
         return true;
     }

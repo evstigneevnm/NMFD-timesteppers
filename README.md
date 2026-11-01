@@ -117,6 +117,24 @@ another, caller states, or solver scratch. The residual is
 `alpha*M(t,u)*(u-previous)-f(t,u)-known_rhs`. Its Jacobian includes derivatives of
 a state-dependent mass. Trial residual calls must not alter frozen Jacobian data.
 
+Problems may evaluate a fixed row-scaled equivalent of that canonical residual.
+The implicit test problems use balanced differential rows:
+`s=max(abs(alpha),1/reference_time)`, `a=alpha/s`, `b=1/s`, and
+`G=a*M(t,u)*(u-previous)-b*(f(t,u)+known_rhs)`. They construct this form directly,
+not by multiplying an already formed large residual. Their Jacobians apply the
+same coefficients, including the mass derivative. `set_affine_shift()` freezes
+the coefficients for the entire Newton solve and its backtracking trials.
+The test reference time defaults to one for these nondimensional models.
+Algebraic constraints and their Jacobian rows remain unscaled. General singular
+mass formulations must supply their own appropriate equation partition/scaling;
+the timestepper does not infer it from a mass-matrix diagonal or invert the mass.
+
+This balances small and large stage steps, including negative shifts and the
+zero-shift steady limit, without changing the stage/Newton interfaces or solver
+tolerances. It is not a globalization controller or a timestep-aware nonlinear
+accuracy budget. Future globalization must measure progress in the original
+physical residual and constraints, not compare scaled norms across stage shifts.
+
 For stage i the stepper writes `previous=u_n+h*sum(a_ij*k_j)` and `known_rhs=0`,
 then sets `alpha=1/(h*a_ii)` and `time=t_n+c_i*h`. The supplied nonlinear solver is
 bound once through `set_nonlinear_operator(problem)` and called with
@@ -132,7 +150,9 @@ not automatically appropriate for every DAE.
 An external manager modifying a DAE endpoint must preserve/reconstruct consistency.
 
 The stepper owns one stage-state vector and s-1 rates for stiffly accurate methods,
-or s rates otherwise. It allocates no embedded-error or dense-output buffers.
+or s rates otherwise. An error-requiring controller with an embedded table adds
+one state-error buffer and, when needed, the previously omitted endpoint rate.
+Constant-step methods allocate neither addition. Dense-output storage is absent.
 Scratch is reused across stages and trajectories; `apply()` publishes only a
 successful candidate. The existing integrator commits through `finalize()`.
 Failed solves report `failed_solver`; custom adaptation may retry via
@@ -140,9 +160,39 @@ Failed solves report `failed_solver`; custom adaptation may retry via
 Configuration/backend exceptions propagate unchanged. Roundoff-close final steps
 are clipped to the target to avoid an unresolved extra Newton solve.
 
-This stage uses constant-step adaptation. Embedded-error controllers report
-`error_estimate_unavailable`; implicit dense output and adaptive estimation are
-deferred. The existing explicit implementation and interfaces are unchanged.
+Embedded pairs support `time_step_adaptation_matlab` and
+`time_step_adaptation_scipy`. The estimate is the state error
+`h*sum((b_i-bhat_i)*k_i)`; its exponent is `embedded_order()+1`, including two
+for the first-order estimator of `SDIRK3(1)3`. The primary endpoint is still
+committed, never the embedded state. Select the controller's error requirement
+before constructing the stepper. Error-free custom controllers retain their
+five-argument `assess()` interface. IE/IM report `error_estimate_unavailable`
+with error-requiring controllers; no step-doubling estimator is implied.
+Implicit dense output and zero-diagonal stages remain deferred.
+
+`test_implicit_adaptive.cpp` checks independent scalar stage/error formulas,
+primary and embedded orders, MATLAB/SciPy tolerance refinement, nonlinear decay,
+time/state-dependent mass, stiff forcing, repeated trajectories, failed/nonfinite
+stages, minimum-step and attempt limits, modified endpoints, and allocation
+failure cleanup. A moving index-1 constraint is checked at every committed
+endpoint, in both time directions. This regression does not establish general
+algebraic-error control or applicability to every singular-mass DAE.
+
+The Lorenz, Rossler, Van der Pol, and mass/DAE regressions additionally run both
+controllers with SDIRK2(1)2 and SDIRK3(1)3 at two tolerances. They check independent
+finite-time references, tolerance refinement, rejected-step accounting, exact
+target times, and repeatable trajectories. Classical Lorenz uses `epsilon=0`;
+the fixed-step damped reference remains separate. Stiff Van der Pol covers fast
+relaxation and early slow motion, not a full relaxation cycle. DAE constraints
+are checked independently at every accepted endpoint, including a nonzero-time
+restart for the moving manifold. Parent CI covers serial CPU, OpenMP, available
+CUDA devices, and CPU address/undefined-behavior sanitizers.
+The DIRK tests also cover coefficient bounds, nonunit reference times, nonzero
+known RHS, invalid-configuration rollback, and the physical steady-limit balance.
+The Lorenz test replays the captured roundoff-limited stage and crosses `t=0.404`
+with the unchanged strict Newton settings. Mass/DAE tests check Jacobians across
+both scaling regimes and verify that deliberately violated algebraic constraints
+remain visible; actual small, large, and backward stages retain consistency.
 
 ```sh
 make -j2 test_implicit_cpu

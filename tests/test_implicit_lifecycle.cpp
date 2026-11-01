@@ -11,16 +11,18 @@ struct constant_rate
 {
     static constexpr int size = 1;
     __DEVICE_TAG__ void  residual(
-         double, double a, const vector_type &x, const vector_type &previous, const vector_type &rhs, vector_type &out
+         double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
+         vector_type &out
      ) const
     {
-        out( 0 ) = a * ( x( 0 ) - previous( 0 ) ) - 1 - rhs( 0 );
+        out( 0 ) = scaling.mass * ( x( 0 ) - previous( 0 ) ) - scaling.rhs * ( 1 + rhs( 0 ) );
     }
     auto jacobian(
-        double, double a, const scfd::static_vec::vec<double, 1> &, const scfd::static_vec::vec<double, 1> &
+        double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 1> &,
+        const scfd::static_vec::vec<double, 1> &
     ) const
     {
-        return scfd::static_mat::mat<double, 1, 1>{ a };
+        return scfd::static_mat::mat<double, 1, 1>{ scaling.mass };
     }
 };
 

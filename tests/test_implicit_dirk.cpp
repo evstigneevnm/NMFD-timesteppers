@@ -12,24 +12,121 @@ struct forced_decay
 {
     static constexpr int size = 1;
     __DEVICE_TAG__ void  residual(
-         double t, double alpha, const vector_type &x, const vector_type &previous, const vector_type &rhs,
-         vector_type &out
+         double t, const stage_scaling &scaling, const vector_type &x, const vector_type &previous,
+         const vector_type &rhs, vector_type &out
      ) const
     {
-        out( 0 ) = alpha * ( x( 0 ) - previous( 0 ) ) + x( 0 ) - t - rhs( 0 );
+        out( 0 ) = scaling.mass * ( x( 0 ) - previous( 0 ) ) + scaling.rhs * ( x( 0 ) - t - rhs( 0 ) );
     }
     auto jacobian(
-        double, double alpha, const scfd::static_vec::vec<double, 1> &, const scfd::static_vec::vec<double, 1> &
+        double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 1> &,
+        const scfd::static_vec::vec<double, 1> &
     ) const
     {
-        return scfd::static_mat::mat<double, 1, 1>{ alpha + 1 };
+        return scfd::static_mat::mat<double, 1, 1>{ scaling.mass + scaling.rhs };
     }
 };
+
+// Exercise both scaling limits without changing the underlying stage equation.
+void test_balanced_scaling()
+{
+    auto             operations = std::make_shared<operations_type>( 1 );
+    vector_wrap_type state( *operations ), residual( *operations );
+    state.start_use();
+    residual.start_use();
+    operations->assign_scalar( .7, *state );
+    for ( const double reference_time : { .25, 1., 4. } )
+    {
+        stage_problem<forced_decay> problem( operations, {}, reference_time );
+        problem.set_time( .4 );
+        operations->assign_scalar( .2, problem.previous_state() );
+        operations->assign_scalar( .1, problem.known_rhs() );
+        for ( const double alpha : { -1e12, -7., -1., -1e-12, 0., 1e-12, 1., 7., 1e12 } )
+        {
+            problem.set_affine_shift( alpha );
+            const auto scaling = problem.scaling();
+            const auto scale   = std::max( std::abs( static_cast<long double>( alpha ) ), 1.L / reference_time );
+            require(
+                std::abs( scaling.mass ) <= 1 && scaling.rhs > 0 && scaling.rhs <= reference_time &&
+                    std::abs( scaling.mass - alpha / scale ) < 2e-15 &&
+                    std::abs( scaling.rhs - 1 / scale ) < 2e-15 * reference_time,
+                "Stage scaling is unbounded or changes the reference timescale"
+            );
+            problem.apply( *state, *residual );
+            const long double physical = static_cast<long double>( alpha ) * ( .7L - .2L ) + .7L - .4L - .1L;
+            require(
+                std::abs( operations->get_value_at_point( 0, *residual ) - physical / scale ) < 2e-15,
+                "Balanced residual changed the equation or omitted the known RHS"
+            );
+            require(
+                problem.scaling().mass == scaling.mass && problem.scaling().rhs == scaling.rhs,
+                "Residual trial changed frozen stage scaling"
+            );
+            check_jacobian( operations, problem, { .7 }, .4, alpha );
+        }
+        const auto before = problem.scaling();
+        for ( const auto invalid :
+              { std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN() } )
+        {
+            bool rejected = false;
+            try
+            {
+                problem.set_affine_shift( invalid );
+            }
+            catch ( const std::invalid_argument & )
+            {
+                rejected = true;
+            }
+            require(
+                rejected && problem.alpha == 1e12 && problem.scaling().mass == before.mass &&
+                    problem.scaling().rhs == before.rhs,
+                "Invalid shift changed prepared stage scaling"
+            );
+        }
+    }
+    for ( const auto invalid :
+          { 0., -1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::denorm_min() } )
+    {
+        bool rejected = false;
+        try
+        {
+            stage_problem<forced_decay> problem( operations, {}, invalid );
+        }
+        catch ( const std::invalid_argument & )
+        {
+            rejected = true;
+        }
+        require( rejected, "Stage scaling accepted an invalid reference time" );
+    }
+
+    // Frozen-time pseudo-transient stages approach f+r=0 as h grows. Check that
+    // physical balance, not the h-dependent scaled norm, measures progress.
+    using problem_type = stage_problem<forced_decay>;
+    auto problem       = std::make_shared<problem_type>( operations );
+    auto solver        = newton_types<problem_type>::make_solver( operations );
+    solver->set_nonlinear_operator( problem );
+    problem->set_time( .4 );
+    operations->assign_scalar( .1, problem->known_rhs() );
+    operations->assign_scalar( 1., *state );
+    double physical_error = .5;
+    for ( const double alpha : { 1., 1e-3, 1e-6, 0. } )
+    {
+        operations->assign( *state, problem->previous_state() );
+        problem->set_affine_shift( alpha );
+        require( solver->solve( *state ), "Large-step or steady-limit Newton stage failed" );
+        const auto error = std::abs( operations->get_value_at_point( 0, *state ) - .5 );
+        require( error < physical_error, "Pseudo-transient stage did not reduce the physical residual" );
+        physical_error = error;
+    }
+    require( physical_error < 2e-10, "Steady-limit stage did not solve the physical equation" );
+}
 
 int main()
 try
 {
     backend_type::init_device();
+    test_balanced_scaling();
     using problem_type          = stage_problem<forced_decay>;
     using types                 = newton_types<problem_type>;
     auto             operations = std::make_shared<operations_type>( 1 );

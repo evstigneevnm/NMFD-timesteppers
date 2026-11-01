@@ -1,6 +1,6 @@
 #ifndef NMFD_TIME_STEPPERS_TESTS_IMPLICIT_ODE_H
 #define NMFD_TIME_STEPPERS_TESTS_IMPLICIT_ODE_H
-#include "implicit_test_support.h"
+#include "implicit_adaptive_test.h"
 
 namespace nmfd
 {
@@ -9,12 +9,14 @@ namespace time_steppers
 namespace tests
 {
 template <int Size, class Mapping>
-__DEVICE_TAG__ void
-identity_mass_residual( const Mapping &mapping, double alpha, const vector_type &previous, const vector_type &rhs )
+__DEVICE_TAG__ void identity_mass_residual(
+    const Mapping &mapping, const stage_scaling &scaling, const vector_type &previous, const vector_type &rhs
+)
 {
     mapping( 0 );
     for ( int i = 0; i < Size; ++i )
-        mapping.out( i ) = alpha * ( mapping.in(i)-previous( i ) ) - mapping.out( i ) - rhs( i );
+        mapping.out( i ) =
+            scaling.mass * ( mapping.in(i)-previous( i ) ) - scaling.rhs * ( mapping.out( i ) + rhs( i ) );
 }
 
 template <class Equation>

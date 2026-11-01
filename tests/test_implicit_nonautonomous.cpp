@@ -4,7 +4,7 @@
 using namespace nmfd::time_steppers;
 using namespace nmfd::time_steppers::tests;
 
-// u'=t*u, exact exp(t^2/2): the stage Jacobian alpha-t must follow the stage time.
+// u'=t*u, exact exp(t^2/2): the balanced Jacobian a-b*t must follow the stage time.
 // (1+t)*u'=-u, exact 1/(1+t): verifies an explicitly time-dependent positive mass.
 // u'=-kappa*(u-sin(t))+cos(t), exact sin(t): tests stiff non-autonomous forcing.
 // Runs start at t=.25 with exact data. Large kappa tests bounded error and refinement,

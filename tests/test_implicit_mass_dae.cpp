@@ -1,4 +1,4 @@
-#include "implicit_test_support.h"
+#include "implicit_adaptive_test.h"
 #include "nonautonomous_test_problems.h"
 
 using namespace nmfd::time_steppers;
@@ -13,19 +13,23 @@ struct coupled_mass
 {
     static constexpr int size = 2;
     __DEVICE_TAG__ void  residual(
-         double, double alpha, const vector_type &x, const vector_type &previous, const vector_type &rhs,
+         double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
          vector_type &out
      ) const
     {
         const auto d0 = x( 0 ) - previous( 0 ), d1 = x( 1 ) - previous( 1 );
-        out( 0 ) = alpha * ( 2 * d0 + d1 ) + 2 * x( 0 ) + 2 * x( 1 ) - rhs( 0 );
-        out( 1 ) = alpha * ( d0 + 3 * d1 ) + x( 0 ) + 6 * x( 1 ) - rhs( 1 );
+        out( 0 ) = scaling.mass * ( 2 * d0 + d1 ) + scaling.rhs * ( 2 * x( 0 ) + 2 * x( 1 ) - rhs( 0 ) );
+        out( 1 ) = scaling.mass * ( d0 + 3 * d1 ) + scaling.rhs * ( x( 0 ) + 6 * x( 1 ) - rhs( 1 ) );
     }
     auto jacobian(
-        double, double a, const scfd::static_vec::vec<double, 2> &, const scfd::static_vec::vec<double, 2> &
+        double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 2> &,
+        const scfd::static_vec::vec<double, 2> &
     ) const
     {
-        return scfd::static_mat::mat<double, 2, 2>{ 2 * a + 2, a + 2, a + 1, 3 * a + 6 };
+        return scfd::static_mat::mat<double, 2, 2>{
+            2 * scaling.mass + 2 * scaling.rhs, scaling.mass + 2 * scaling.rhs, scaling.mass + scaling.rhs,
+            3 * scaling.mass + 6 * scaling.rhs
+        };
     }
 };
 
@@ -36,25 +40,27 @@ struct variable_mass
 {
     static constexpr int size = 1;
     __DEVICE_TAG__ void  residual(
-         double, double alpha, const vector_type &x, const vector_type &previous, const vector_type &rhs,
+         double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
          vector_type &out
      ) const
     {
         const auto u = x( 0 );
-        out( 0 )     = ( 1 + u * u ) * ( alpha * ( u - previous( 0 ) ) + u ) - rhs( 0 );
+        out( 0 ) = ( 1 + u * u ) * ( scaling.mass * ( u - previous( 0 ) ) + scaling.rhs * u ) - scaling.rhs * rhs( 0 );
     }
     auto jacobian(
-        double, double a, const scfd::static_vec::vec<double, 1> &x, const scfd::static_vec::vec<double, 1> &previous
+        double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 1> &x,
+        const scfd::static_vec::vec<double, 1> &previous
     ) const
     {
         return scfd::static_mat::mat<double, 1, 1>{
-            a * ( 1 + x[0] * x[0] ) + 2 * a * x[0] * ( x[0] - previous[0] ) + 1 + 3 * x[0] * x[0]
+            scaling.mass * ( 1 + x[0] * x[0] + 2 * x[0] * ( x[0] - previous[0] ) ) +
+            scaling.rhs * ( 1 + 3 * x[0] * x[0] )
         };
     }
 };
 
 // (1+t)*u'=-u, u(0)=1; exact u=1/(1+t). Positive, explicitly time-dependent mass.
-// The full stage Jacobian is alpha*(1+t)+1, evaluated at the current stage time.
+// The balanced stage Jacobian is a*(1+t)+b, evaluated at the current stage time.
 using time_dependent_mass = scalar_time_equation<time_mass_decay<double>>;
 
 // coupled_dae: x'=-x-z+x^2, 0=z-x^2, with initial state (1,1).
@@ -64,18 +70,22 @@ struct coupled_dae
 {
     static constexpr int size = 2;
     __DEVICE_TAG__ void  residual(
-         double, double alpha, const vector_type &x, const vector_type &previous, const vector_type &rhs,
+         double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
          vector_type &out
      ) const
     {
-        out( 0 ) = alpha * ( x( 0 ) - previous( 0 ) ) + x( 0 ) + x( 1 ) - x( 0 ) * x( 0 ) - rhs( 0 );
+        out( 0 ) =
+            scaling.mass * ( x( 0 ) - previous( 0 ) ) + scaling.rhs * ( x( 0 ) + x( 1 ) - x( 0 ) * x( 0 ) - rhs( 0 ) );
         out( 1 ) = x( 1 ) - x( 0 ) * x( 0 ) - rhs( 1 );
     }
     auto jacobian(
-        double, double a, const scfd::static_vec::vec<double, 2> &x, const scfd::static_vec::vec<double, 2> &
+        double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 2> &x,
+        const scfd::static_vec::vec<double, 2> &
     ) const
     {
-        return scfd::static_mat::mat<double, 2, 2>{ a + 1 - 2 * x[0], 1, -2 * x[0], 1 };
+        return scfd::static_mat::mat<double, 2, 2>{
+            scaling.mass + scaling.rhs * ( 1 - 2 * x[0] ), scaling.rhs, -2 * x[0], 1
+        };
     }
 };
 
@@ -86,18 +96,22 @@ struct moving_constraint_dae
 {
     static constexpr int size = 2;
     __DEVICE_TAG__ void  residual(
-         double t, double alpha, const vector_type &x, const vector_type &previous, const vector_type &rhs,
-         vector_type &out
+         double t, const stage_scaling &scaling, const vector_type &x, const vector_type &previous,
+         const vector_type &rhs, vector_type &out
      ) const
     {
-        out( 0 ) = alpha * ( x( 0 ) - previous( 0 ) ) + ( 1 - std::sin( t ) ) * x( 0 ) + x( 1 ) - rhs( 0 );
+        out( 0 ) = scaling.mass * ( x( 0 ) - previous( 0 ) ) +
+                   scaling.rhs * ( ( 1 - std::sin( t ) ) * x( 0 ) + x( 1 ) - rhs( 0 ) );
         out( 1 ) = x( 1 ) - std::sin( t ) * x( 0 ) - rhs( 1 );
     }
     auto jacobian(
-        double t, double alpha, const scfd::static_vec::vec<double, 2> &, const scfd::static_vec::vec<double, 2> &
+        double t, const stage_scaling &scaling, const scfd::static_vec::vec<double, 2> &,
+        const scfd::static_vec::vec<double, 2> &
     ) const
     {
-        return scfd::static_mat::mat<double, 2, 2>{ alpha + 1 - std::sin( t ), 1, -std::sin( t ), 1 };
+        return scfd::static_mat::mat<double, 2, 2>{
+            scaling.mass + scaling.rhs * ( 1 - std::sin( t ) ), scaling.rhs, -std::sin( t ), 1
+        };
     }
 };
 
@@ -109,19 +123,24 @@ struct stokes_dae
 {
     static constexpr int size = 3;
     __DEVICE_TAG__ void  residual(
-         double t, double alpha, const vector_type &x, const vector_type &previous, const vector_type &rhs,
-         vector_type &out
+         double t, const stage_scaling &scaling, const vector_type &x, const vector_type &previous,
+         const vector_type &rhs, vector_type &out
      ) const
     {
-        out( 0 ) = alpha * ( x( 0 ) - previous( 0 ) ) + x( 0 ) + x( 2 ) - std::sin( t ) - rhs( 0 );
-        out( 1 ) = alpha * ( x( 1 ) - previous( 1 ) ) + 2 * x( 1 ) + x( 2 ) + std::exp( -t ) - std::sin( t ) - rhs( 1 );
+        out( 0 ) =
+            scaling.mass * ( x( 0 ) - previous( 0 ) ) + scaling.rhs * ( x( 0 ) + x( 2 ) - std::sin( t ) - rhs( 0 ) );
+        out( 1 ) = scaling.mass * ( x( 1 ) - previous( 1 ) ) +
+                   scaling.rhs * ( 2 * x( 1 ) + x( 2 ) + std::exp( -t ) - std::sin( t ) - rhs( 1 ) );
         out( 2 ) = x( 0 ) + x( 1 ) - rhs( 2 );
     }
     auto jacobian(
-        double, double a, const scfd::static_vec::vec<double, 3> &, const scfd::static_vec::vec<double, 3> &
+        double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 3> &,
+        const scfd::static_vec::vec<double, 3> &
     ) const
     {
-        return scfd::static_mat::mat<double, 3, 3>{ a + 1, 0, 1, 0, a + 2, 1, 1, 1, 0 };
+        return scfd::static_mat::mat<double, 3, 3>{
+            scaling.mass + scaling.rhs, 0, scaling.rhs, 0, scaling.mass + 2 * scaling.rhs, scaling.rhs, 1, 1, 0
+        };
     }
 };
 
@@ -139,16 +158,18 @@ struct constraint_monitor
     {
         scfd::static_vec::vec<double, Equation::size> x;
         operations->get( out, x.d, Equation::size );
-        double constraint = 0;
-        if constexpr ( std::is_same_v<Equation, stokes_dae> )
-            constraint = x[0] + x[1];
-        else if constexpr ( std::is_same_v<Equation, moving_constraint_dae> )
-            constraint = x[1] - std::sin( time ) * x[0];
-        else
-            constraint = x[1] - x[0] * x[0];
-        require( std::abs( constraint ) < 2e-9, "DAE constraint violated at accepted endpoint" );
+        require( std::abs( constraint( x, time ) ) < 2e-9, "DAE constraint violated at accepted endpoint" );
         ++calls;
         return false;
+    }
+    static double constraint( const scfd::static_vec::vec<double, Equation::size> &x, double time )
+    {
+        if constexpr ( std::is_same_v<Equation, stokes_dae> )
+            return x[0] + x[1];
+        else if constexpr ( std::is_same_v<Equation, moving_constraint_dae> )
+            return x[1] - std::sin( time ) * x[0];
+        else
+            return x[1] - x[0] * x[0];
     }
     integration_status get_status() const
     {
@@ -173,8 +194,57 @@ scfd::static_vec::vec<double, Equation::size> exact_state( double time )
     return state;
 }
 
+// Deliberately inconsistent points must retain their full constraint residual,
+// even when the differential rows have been strongly scaled. Then check actual
+// small/large and backward IE stages from consistent initial data.
 template <class Equation>
-void test_mass( const scfd::static_vec::vec<double, Equation::size> &point, double start = 0 )
+void test_dae_scaling(
+    std::shared_ptr<operations_type> operations, const scfd::static_vec::vec<double, Equation::size> &point
+)
+{
+    using problem_type = stage_problem<Equation>;
+    using monitor_type = constraint_monitor<Equation>;
+    vector_wrap_type state( *operations ), result( *operations );
+    state.start_use();
+    result.start_use();
+    for ( const double reference_time : { .25, 4. } )
+    {
+        problem_type problem( operations, {}, reference_time );
+        operations->assign_scalar( .2, problem.previous_state() );
+        operations->assign_scalar( .1, problem.known_rhs() );
+        operations->set( point.d, *state, Equation::size );
+        problem.set_time( .4 );
+        for ( const double alpha : { -1e12, -1e-12, 0., 1e-12, 1e12 } )
+        {
+            problem.set_affine_shift( alpha );
+            problem.apply( *state, *result );
+            const auto actual = operations->get_value_at_point( Equation::size - 1, *result );
+            require(
+                std::abs( actual - ( monitor_type::constraint( point, .4 ) - .1 ) ) < 2e-15,
+                "Balanced scaling hid an algebraic constraint or changed its known RHS"
+            );
+        }
+    }
+    auto       problem = std::make_shared<problem_type>( operations );
+    const auto initial = exact_state<Equation>( .25 );
+    operations->set( initial.d, *state, Equation::size );
+    for ( const double h : { -1e-6, 1e-6, 10. } )
+    {
+        auto   step = make_step( operations, problem, std::abs( h ), "IE" );
+        double end  = .25 + h;
+        step->set_time( .25 );
+        step->set_target_time( end );
+        step->apply( *state, *result );
+        require( step->get_status() == single_step_status::converged, "Balanced small/large-step DAE solve failed" );
+        monitor_type monitor{ operations };
+        monitor.set_time_interval( .25, end );
+        monitor.apply( *state, *result );
+        step->finalize( adaptation_status::accepted, end, *result );
+    }
+}
+
+template <class Equation>
+void test_mass( const scfd::static_vec::vec<double, Equation::size> &point, const char *label, double start = 0 )
 {
     using problem_type = stage_problem<Equation>;
     using types        = newton_types<problem_type>;
@@ -182,7 +252,8 @@ void test_mass( const scfd::static_vec::vec<double, Equation::size> &point, doub
     auto operations    = std::make_shared<operations_type>( Equation::size );
     auto problem       = std::make_shared<problem_type>( operations );
     for ( const double time : { 0., .4, .9 } )
-        check_jacobian( operations, *problem, point, time );
+        for ( const double alpha : { -1e6, -.01, 0., .01, 1e6 } )
+            check_jacobian( operations, *problem, point, time, alpha );
     vector_wrap_type initial( *operations ), result( *operations );
     initial.start_use();
     result.start_use();
@@ -231,19 +302,30 @@ void test_mass( const scfd::static_vec::vec<double, Equation::size> &point, doub
         }
         require( errors[1] < .6 * errors[0], "Mass/DAE refinement did not improve accuracy" );
     }
+    if constexpr ( std::is_same_v<Equation, coupled_dae> || std::is_same_v<Equation, stokes_dae> ||
+                   std::is_same_v<Equation, moving_constraint_dae> )
+    {
+        test_dae_scaling<Equation>( operations, point );
+        test_adaptive_system(
+            Equation{}, initial_values, reference, start, start + .4, label, operations,
+            std::make_shared<monitor_type>( monitor_type{ operations } )
+        );
+    }
+    else
+        test_adaptive_system( Equation{}, initial_values, reference, start, start + .4, label, operations );
 }
 
 int main()
 try
 {
     backend_type::init_device();
-    test_mass<coupled_mass>( { .7, .4 } );
-    test_mass<variable_mass>( { .7 } );
-    test_mass<time_dependent_mass>( { .7 } );
-    test_mass<coupled_dae>( { .7, .4 } );
-    test_mass<moving_constraint_dae>( { .7, .4 } );
-    test_mass<moving_constraint_dae>( { .7, .4 }, .25 );
-    test_mass<stokes_dae>( { .7, -.7, .2 } );
+    test_mass<coupled_mass>( { .7, .4 }, "Coupled mass" );
+    test_mass<variable_mass>( { .7 }, "State-dependent mass" );
+    test_mass<time_dependent_mass>( { .7 }, "Time-dependent mass" );
+    test_mass<coupled_dae>( { .7, .4 }, "Nonlinear index-1 DAE" );
+    test_mass<moving_constraint_dae>( { .7, .4 }, "Moving index-1 DAE" );
+    test_mass<moving_constraint_dae>( { .7, .4 }, "Shifted moving index-1 DAE", .25 );
+    test_mass<stokes_dae>( { .7, -.7, .2 }, "Stokes index-2 DAE" );
     std::cout << "DIRK coupled/state/time-dependent mass, moving constraints, index-1 and Stokes index-2 DAEs: PASS\n";
 }
 catch ( const std::exception &e )

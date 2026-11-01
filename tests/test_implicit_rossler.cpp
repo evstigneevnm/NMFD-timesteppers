@@ -11,17 +11,28 @@ struct rossler_equation : explicit_rossler_problem<operations_type>
 {
     static constexpr int size = 3;
     __DEVICE_TAG__ void  residual(
-         double, double alpha, const vector_type &x, const vector_type &previous, const vector_type &rhs,
+         double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
          vector_type &out
      ) const
     {
-        identity_mass_residual<3>( mapping{ x, out, a, b, c }, alpha, previous, rhs );
+        identity_mass_residual<3>( mapping{ x, out, a, b, c }, scaling, previous, rhs );
     }
     auto jacobian(
-        double, double alpha, const scfd::static_vec::vec<double, 3> &x, const scfd::static_vec::vec<double, 3> &
+        double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 3> &x,
+        const scfd::static_vec::vec<double, 3> &
     ) const
     {
-        return scfd::static_mat::mat<double, 3, 3>{ alpha, 1, 1, -1, alpha - a, 0, -x[2], 0, alpha - x[0] + c };
+        return scfd::static_mat::mat<double, 3, 3>{
+            scaling.mass,
+            scaling.rhs,
+            scaling.rhs,
+            -scaling.rhs,
+            scaling.mass - scaling.rhs * a,
+            0,
+            -scaling.rhs * x[2],
+            0,
+            scaling.mass + scaling.rhs * ( c - x[0] )
+        };
     }
 };
 
@@ -31,6 +42,10 @@ try
     backend_type::init_device();
     test_ode(
         rossler_equation{}, { 2, 0, 0 }, { .98415292572457735, 1.8475471904515657, .045002515579204969 }, 1, .01
+    );
+    test_adaptive_system(
+        rossler_equation{}, { 2, 0, 0 }, { .98415292572457735, 1.8475471904515657, .045002515579204969 }, 0, 1,
+        "Rossler"
     );
     std::cout << "Implicit Rossler, analytical Jacobian, reference refinement and restart: PASS\n";
 }
