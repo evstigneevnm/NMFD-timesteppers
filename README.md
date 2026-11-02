@@ -413,6 +413,79 @@ analytical Jacobians with external diagnostic drivers. They are test models,
 not additional public solver interfaces; no executable `.cpp` inclusion or
 duplicated numerical formulas is needed.
 
+## Pseudo-Time Globalization
+
+`integration/time_step_adaptation_globalization.h` supplies a separate policy for
+relaxing toward steady equations. It does not control physical-time accuracy or
+change Newton's convergence settings. Its existing adaptation interface works
+with IE and the supported DIRK methods without an embedded estimator.
+
+```cpp
+using controller_type = nmfd::time_steppers::integration::time_step_adaptation_globalization<
+    vector_operations_type, steady_merit_type>;
+controller_type::params p;
+p.initial_step = .01;
+p.maximum_step = 1e6;
+auto control = std::make_shared<controller_type>(steady_merit, p);
+```
+
+`steady_merit` is a shared functor whose `operator()(const vector_type&)` returns a
+nonnegative physical steady-residual measure. It must not use the shift-dependent
+stage residual. Keep the physical time and equation parameters fixed in both the
+problem and merit; the stepper's advancing time is pseudo time. The policy is
+forward-only. Use an external manager to stop at the desired steady tolerance.
+
+For committed merit `m` and trial merit `m_trial`, the default accepts every
+successfully solved, finite, admissible candidate with finite nonnegative merit,
+including temporary merit growth. `maximum_merit_growth = 0` (the default)
+disables growth-based rejection. Set it to a finite value at least one only to
+enable an explicit growth guard; one requests monotone merit. A decaying physical
+trajectory need not have monotonically decaying residuals, so that guard may
+prevent progress even for stable systems.
+
+The next proposal is `h*(m/m_trial)^residual_power`, with factor bounds `[0.5,2]`
+and the configured positive step bounds. Thus merit growth normally shrinks the
+next step rather than rejecting the current one. The exponent defaults to one.
+Zero trial merit permits bounded growth; two zero merits keep the step unchanged;
+zero-to-nonzero merit uses the minimum factor. Nonfinite trial merit, a failed
+stage, or an enabled growth guard triggers `rejection_factor` shrinking (default
+`0.5`), with no immediate growth after retry. Failure at the minimum step is
+returned, never accepted. Budget exhaustion is not evidence of an equilibrium.
+
+The policy retains only scalar history and a shared merit handle, with one merit
+evaluation per trial after caching the committed baseline. Initialization/reset,
+pseudo-time jumps and modified endpoints invalidate that cache. Reset after an
+independent state or merit-definition change. Failed stages bypass assessment;
+rejected candidates never become the baseline. Merit reductions stay on the
+selected backend; the controller allocates no vectors and copies no vector data.
+
+`test_implicit_globalization_{cpu,cpu_omp,cuda}.bin` checks parameter validation,
+bounded growth/shrinkage, zero/nonfinite merits, retries, modified/failed commits,
+reset and steady convergence of a nonlinear ODE and a singular-mass constrained
+DAE with IE and both SDIRK methods. Per-system steady regressions are separate:
+
+- `test_implicit_nonnormal_steady_state`: stable linear dynamics with initially
+  increasing residual, optional monotone-guard failure, restart and budget checks.
+- `test_implicit_lorenz_steady_state`: all three unstable classical Lorenz roots
+  (`epsilon=0`), plus damped Lorenz (`epsilon=0.05`) in both attracting basins
+  compared with analytical equilibria and ordinary error-controlled RK45.
+- `test_implicit_rossler_steady_state`: both unstable analytical equilibria.
+- `test_implicit_vdp_steady_state`: the unstable origin for `mu=1` and `mu=1000`.
+
+The unstable cases use perturbed seeds and initial pseudo-steps of 1 (Lorenz),
+100 (Rossler), and 10/1e6 (Van der Pol). These are controlled root searches with
+IE and both SDIRK methods, not a guarantee of convergence from arbitrary seeds
+or with default small steps. Physical residuals must reach `1e-8` (`5e-10` for
+stiff Van der Pol), with independent component errors below `1e-6`. Repeated
+solves check controller reset and preservation of the initial state.
+These are equilibrium comparisons, not assertions about identical transient
+trajectories or settling times; the legacy `epsilon=0.0055` physical-time
+regressions remain unchanged. Merit work
+uses the physical RHS kernels and backend reductions without vector-sized host
+copies. Parent CI includes CPU/OpenMP, capability-gated CUDA and sanitizer
+coverage. Ordinary integration still uses its independently selected constant,
+MATLAB, SciPy or filter controller. No timestepper method signatures change.
+
 ## Visual ODE Benchmarks
 
 From the parent project root (or from the standalone library checkout), run:
