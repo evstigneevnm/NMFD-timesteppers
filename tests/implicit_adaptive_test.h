@@ -2,6 +2,8 @@
 #define NMFD_TIME_STEPPERS_TESTS_IMPLICIT_ADAPTIVE_H
 
 #include "implicit_test_support.h"
+#include <limits>
+#include <nmfd/time_steppers/integration/time_step_adaptation_filter.h>
 #include <nmfd/time_steppers/integration/time_step_adaptation_matlab.h>
 #include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 
@@ -64,7 +66,8 @@ double test_adaptive_trajectory(
     std::shared_ptr<operations_type> operations, const Equation &equation,
     const scfd::static_vec::vec<double, Equation::size> &initial_values,
     const scfd::static_vec::vec<double, Equation::size> &reference, double start, double end, const char *label,
-    const char *controller_name, const char *method, std::shared_ptr<Monitor> monitor
+    const char *controller_name, const char *method, std::shared_ptr<Monitor> monitor,
+    const typename Controller::params &settings = controller_parameters<Controller>()
 )
 {
     using problem_type = stage_problem<Equation>;
@@ -83,7 +86,9 @@ double test_adaptive_trajectory(
         reference_scale = std::max( reference_scale, std::abs( reference[i] ) );
     for ( int level = 0; level < 2; ++level )
     {
-        auto p         = controller_parameters<Controller>( level ? 2e-5 : 2e-3 );
+        auto p               = settings;
+        p.relative_tolerance = level ? 2e-5 : 2e-3;
+        p.absolute_tolerance = p.relative_tolerance * .01;
         p.initial_step = p.maximum_step = std::abs( end - start );
         auto control                    = std::make_shared<adaptation>( operations, p );
         auto step                       = std::make_shared<step_type>(
@@ -130,7 +135,14 @@ double test_adaptive_trajectory(
                 require( std::isfinite( actual[i] ), "Adaptive system published a nonfinite endpoint" );
                 errors[level] = std::max( errors[level], std::abs( actual[i] - reference[i] ) );
                 if ( run )
-                    require( actual[i] == first[i], "Adaptive system restart changed its trajectory" );
+                {
+                    // Parallel reductions may change summation order between otherwise identical runs.
+                    const auto roundoff = 128 * std::numeric_limits<double>::epsilon() *
+                                          std::max( { 1., std::abs( actual[i] ), std::abs( first[i] ) } );
+                    require(
+                        std::abs( actual[i] - first[i] ) <= roundoff, "Adaptive system restart changed its trajectory"
+                    );
+                }
             }
             if ( !run )
             {
@@ -187,6 +199,17 @@ double test_adaptive_system(
                                operations, equation, initial, reference, start, end, label, "SciPy", method, monitor
                            )
         );
+        using filter = integration::time_step_adaptation_filter<operations_type>;
+        for ( const char *name : { "I", "H211", "PC", "PID", "H312", "PPID", "H321" } )
+        {
+            auto p        = controller_parameters<filter>();
+            p.controller  = name;
+            maximum_error = std::max(
+                maximum_error, test_adaptive_trajectory<filter>(
+                                   operations, equation, initial, reference, start, end, label, name, method, monitor, p
+                               )
+            );
+        }
     }
     return maximum_error;
 }

@@ -40,6 +40,8 @@ for explicit-only users.
   control, first-rejection formula, repeated halving, and no growth after rejection.
 - `integration/time_step_adaptation_scipy.h`: additive tolerance scaling, RMS error
   assessment, and SciPy-style power-law step selection with bounded growth/shrinkage.
+- `integration/time_step_adaptation_filter.h`: seven digital-filter presets with
+  committed error/step history, additive RMS assessment, and bounded startup/retries.
 - `integration/time_integrator.h`: interval traversal, external management, commit.
 
 An explicit problem supplies `apply(in, rate)` and optionally `set_time(t)`.
@@ -160,8 +162,9 @@ Failed solves report `failed_solver`; custom adaptation may retry via
 Configuration/backend exceptions propagate unchanged. Roundoff-close final steps
 are clipped to the target to avoid an unresolved extra Newton solve.
 
-Embedded pairs support `time_step_adaptation_matlab` and
-`time_step_adaptation_scipy`. The estimate is the state error
+Embedded pairs support `time_step_adaptation_matlab`,
+`time_step_adaptation_scipy`, and `time_step_adaptation_filter`. The estimate is
+the state error
 `h*sum((b_i-bhat_i)*k_i)`; its exponent is `embedded_order()+1`, including two
 for the first-order estimator of `SDIRK3(1)3`. The primary endpoint is still
 committed, never the embedded state. Select the controller's error requirement
@@ -171,15 +174,16 @@ with error-requiring controllers; no step-doubling estimator is implied.
 Implicit dense output and zero-diagonal stages remain deferred.
 
 `test_implicit_adaptive.cpp` checks independent scalar stage/error formulas,
-primary and embedded orders, MATLAB/SciPy tolerance refinement, nonlinear decay,
+primary and embedded orders, MATLAB/SciPy/PID tolerance refinement, nonlinear decay,
 time/state-dependent mass, stiff forcing, repeated trajectories, failed/nonfinite
 stages, minimum-step and attempt limits, modified endpoints, and allocation
 failure cleanup. A moving index-1 constraint is checked at every committed
 endpoint, in both time directions. This regression does not establish general
 algebraic-error control or applicability to every singular-mass DAE.
 
-The Lorenz, Rossler, Van der Pol, and mass/DAE regressions additionally run both
-controllers with SDIRK2(1)2 and SDIRK3(1)3 at two tolerances. They check independent
+The Lorenz, Rossler, Van der Pol, and mass/DAE regressions additionally run MATLAB,
+SciPy, and all seven filter presets with SDIRK2(1)2 and SDIRK3(1)3 at two
+tolerances. They check independent
 finite-time references, tolerance refinement, rejected-step accounting, exact
 target times, and repeatable trajectories. Classical Lorenz uses `epsilon=0`;
 the fixed-step damped reference remains separate. Stiff Van der Pol covers fast
@@ -361,6 +365,106 @@ OMP_NUM_THREADS=8 ./build/test_explicit_scipy_adaptation_cpu_omp.bin
 Use `_cpu.bin` or `_cuda.bin` for other backends. Generic reduction tests use
 `test_transform_reduce_sum_{cpu,cpu_omp,cuda}.bin`. CI has separate reduction and
 SciPy adaptation CPU jobs plus capability-gated CUDA coverage.
+
+## Filter Adaptation
+
+`integration/time_step_adaptation_filter.h` provides I, H211, PC, PID (default),
+H312, PPID, and H321 presets. Select one through `params::controller`; the other
+five parameters match SciPy adaptation. Scaling is additive RMS, acceptance is
+strictly below one, and the estimator already contains its step-size factor.
+The error powers use the supplied state-error exponent (`embedded_order()+1`),
+not the primary method order. These presets follow the recurrence and coefficients
+in [Kennedy and Carpenter, Eq. 93 and Table 8](https://ntrs.nasa.gov/api/citations/20160005923/downloads/20160005923.pdf).
+
+For normalized errors `E` and actual attempted step magnitudes `h`, the proposal is
+`0.9*h_n*E_n^(-alpha)*E_(n-1)^beta*E_(n-2)^(-gamma)` times
+`(h_n/h_(n-1))^a*(h_(n-1)/h_(n-2))^b`. It is evaluated in the log domain with
+growth limits `[0.2,10]` and configured step bounds. I control is used until enough
+accepted samples exist, and for error retries; numerical failures shrink by `0.2`.
+There is no immediate growth after rejection. Exactly zero error permits bounded
+growth without taking a logarithm of zero.
+
+History contains only two committed scalar samples, never rejected trials or
+predicted step sizes. Assessment stages a sample; `update(accepted,...)` commits
+it. A modified endpoint, a time discontinuity, a direction or estimator-order
+change, `reset()`, or initialization invalidates history. External modifications
+also bound the next step by the elapsed interval. This is error control, not
+steady-state globalization or a nonlinear-tolerance policy.
+
+```cpp
+using controller_type = nmfd::time_steppers::integration::time_step_adaptation_filter<vector_operations_type>;
+controller_type::params p;
+p.controller = "H211";
+auto control = std::make_shared<controller_type>(operations, p);
+```
+
+RK23, RK45, and embedded DIRK pairs use this controller without stepper changes.
+DOP853's combined dual estimator is not supported; use SciPy adaptation for it.
+The controller allocates no vectors and uses the backend reduction directly,
+without vector-sized host/device copies. `test_explicit_filter_adaptation` checks
+all recurrences independently for float/double, startup, committed history,
+rejection, bounds, modified endpoints, forward/backward RK, and repeated runs.
+Parent CI adds serial/OpenMP and capability-gated CUDA jobs plus sanitizer
+coverage; implicit system jobs exercise every preset with both SDIRK methods.
+
+The `tests/implicit_{lorenz,rossler,vdp}_problem.h` and
+`tests/implicit_mass_dae_problems.h` headers share the regression equations and
+analytical Jacobians with external diagnostic drivers. They are test models,
+not additional public solver interfaces; no executable `.cpp` inclusion or
+duplicated numerical formulas is needed.
+
+## Visual ODE Benchmarks
+
+From the parent project root (or from the standalone library checkout), run:
+
+```bash
+bash source/contrib/nmfd-timesteppers/tests/run_all.sh
+# In a standalone checkout: bash tests/run_all.sh
+```
+
+The default output is `build/ode_benchmarks/`, relative to the caller's working
+directory. Use `--build-dir PATH` to override it. One shared executable lives in
+`bin/`; every selected system receives `config.json` and an executable `run.sh`.
+Runs are preserved under `<system>/runs/<batch>/`, with per-case logs, trajectories,
+independent references, component/phase/step/error/constraint plots, and
+`summary.json`. Batch results are retained in `reports/`.
+
+```bash
+# Force rebuilding and assembling only. No trajectories, plots, or GPU initialization.
+bash source/contrib/nmfd-timesteppers/tests/run_all.sh -B
+
+# Run only Lorenz, or launch a previously assembled case.
+bash source/contrib/nmfd-timesteppers/tests/run_all.sh --system lorenz
+bash build/ode_benchmarks/lorenz/run.sh
+
+# Optional backends and controller selection.
+bash source/contrib/nmfd-timesteppers/tests/run_all.sh --backend cpu_omp --threads 2
+bash source/contrib/nmfd-timesteppers/tests/run_all.sh --backend cuda --controllers H211 PID H321
+```
+
+Normal invocations rebuild only stale binaries and leave unchanged assembly files
+untouched. Compiler dependency files track the included timestepper, model, NMFD,
+SCFD, and JSON headers. Changes to the Makefile or recorded compiler/dependency
+settings also invalidate the build. `-B` forces a rebuild for the selected backend
+and **does not run benchmarks**; it needs only Python's standard library and the
+C++ dependencies. Normal execution additionally requires NumPy, SciPy, and
+Matplotlib. Set `PYTHON` explicitly when needed. Sibling dependency paths and
+compiler settings follow the standalone Makefile's existing environment variables.
+
+Defaults preserve the twelve-system matrix: Lorenz and Rossler to `t=50`, Van der
+Pol to `t=20` (`mu=1`) or `t=10` (`mu=1000`), and the manufactured mass/DAE and
+non-autonomous cases. Both SDIRK methods and all nine MATLAB/SciPy/filter settings
+are selected, giving 216 trajectories. Default adaptation is `rtol=1e-5`,
+`atol=1e-7`, initial step `0.001`, and step bounds `[1e-8,0.05]`; Newton tolerances
+remain `2e-10` absolute and `1e-12` relative. Use `--help` for interval and other
+overrides. Analytical initial states are computed consistently at `--start`.
+
+Lorenz/Rossler accuracy is checked over the first two time units; later chaotic
+divergence is plotted, not treated as an integration failure. Other systems use
+the full interval. The diagnostic bound is `max(abs(error)/(1+abs(reference))) <=
+0.01`, configurable with `--max-relative-error`. Every trajectory must reach its
+full target with finite states; DAE constraints must remain below `2e-9`. These
+diagnostic bounds do not replace or relax the existing CI accuracy regressions.
 
 ## DOP853
 

@@ -56,7 +56,12 @@ void test_ode(
             typename problem_type::state_type repeated;
             operations->get( *result, repeated.d, Equation::size );
             for ( int i = 0; i < Equation::size; ++i )
-                require( repeated[i] == actual[i], "Implicit ODE restart changed trajectory" );
+            {
+                // Parallel reduction order is not required to be bitwise reproducible.
+                const auto roundoff = 128 * std::numeric_limits<double>::epsilon() *
+                                      std::max( { 1., std::abs( actual[i] ), std::abs( repeated[i] ) } );
+                require( std::abs( repeated[i] - actual[i] ) <= roundoff, "Implicit ODE restart changed trajectory" );
+            }
         }
         require( errors[1] < std::max( 2e-10, .7 * errors[0] ), "Implicit ODE refinement failed" );
         double reference_scale = 1;

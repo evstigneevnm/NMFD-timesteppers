@@ -1,34 +1,7 @@
-#include "implicit_ode_test.h"
-#include "explicit_vdp_problem.h"
+#include "implicit_vdp_problem.h"
 
+using namespace nmfd::time_steppers;
 using namespace nmfd::time_steppers::tests;
-
-// Van der Pol: x'=v, v'=mu*(1-x^2)*v-x; initial state (2,0), identity mass.
-// Autonomous nonlinear oscillator; mu=1 is tested over [0,1].
-// The stiff case mu=1000 is tested over [0,0.02], covering fast relaxation and early slow motion.
-// References are independently computed; the stiff reference is cross-checked with Radau/DOP853.
-// Checks Jacobians, refinement, and restart, not accuracy over a complete relaxation cycle.
-struct vdp_equation : explicit_vdp_problem<operations_type>
-{
-    static constexpr int size = 2;
-    __DEVICE_TAG__ void  residual(
-         double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
-         vector_type &out
-     ) const
-    {
-        identity_mass_residual<2>( mapping{ x, out, mu }, scaling, previous, rhs );
-    }
-    auto jacobian(
-        double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 2> &x,
-        const scfd::static_vec::vec<double, 2> &
-    ) const
-    {
-        return scfd::static_mat::mat<double, 2, 2>{
-            scaling.mass, -scaling.rhs, scaling.rhs * ( 1 + 2 * mu * x[0] * x[1] ),
-            scaling.mass - scaling.rhs * mu * ( 1 - x[0] * x[0] )
-        };
-    }
-};
 
 int main()
 try

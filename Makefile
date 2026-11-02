@@ -29,7 +29,9 @@ IMPLICIT_CUDA_BINS := $(addprefix $(BUILD_DIR)/test_implicit_,$(addsuffix _cuda.
 IMPLICIT_INCLUDES := $(INCLUDES) -I$(NMFD_NEWTON_ROOT)/include -I$(NMFD_LINSOLVERS_ROOT)/include
 IMPLICIT_HEADERS := $(wildcard $(NMFD_NEWTON_ROOT)/include/nmfd/solvers/*.h $(NMFD_LINSOLVERS_ROOT)/include/nmfd/solvers/*.h)
 SIMULATION_BINS := $(addprefix $(BUILD_DIR)/test_explicit_lorenz_simulation_,$(addsuffix .bin,cpu cpu_omp cuda))
-BIN_TARGETS := $(notdir $(TABLE_BINS) $(CPU_BINS) $(CUDA_BINS) $(SIMULATION_BINS) $(IMPLICIT_CPU_BINS) $(IMPLICIT_CUDA_BINS))
+BENCHMARK_BINS := $(addprefix $(BUILD_DIR)/ode_benchmarks_,$(addsuffix .bin,cpu cpu_omp cuda))
+BENCHMARK_CONFIG ?=
+BIN_TARGETS := $(notdir $(TABLE_BINS) $(CPU_BINS) $(CUDA_BINS) $(SIMULATION_BINS) $(IMPLICIT_CPU_BINS) $(IMPLICIT_CUDA_BINS) $(BENCHMARK_BINS))
 
 .PHONY: check_dependencies test_tables test_cpu test_cuda check_headers_cpu check_headers_cuda format format-check $(BIN_TARGETS)
 .PHONY: check_implicit_dependencies test_implicit_cpu test_implicit_cuda
@@ -73,6 +75,25 @@ $(BUILD_DIR)/test_explicit_%_cuda.bin: tests/test_explicit_%.cpp $(HEADERS) $(BU
 $(BUILD_DIR)/test_implicit_%_cuda.bin: tests/test_implicit_%.cpp $(HEADERS) $(IMPLICIT_HEADERS) $(BUILD_DIR)/cuda_reductions.o | check_implicit_dependencies $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) $(CPPFLAGS) $(IMPLICIT_INCLUDES) -DTEST_VECTOR_BACKEND_CUDA -x cu -c $< -o $(@:.bin=.o)
 	$(NVCC) $(NVCCFLAGS) $(@:.bin=.o) $(BUILD_DIR)/cuda_reductions.o -lcublas -lcurand -o $@
+
+$(BENCHMARK_BINS): CPPFLAGS += -I$(JSON_INCLUDE)
+
+$(BUILD_DIR)/ode_benchmarks_cpu.bin: tests/ode_benchmarks.cpp Makefile $(BENCHMARK_CONFIG) | check_implicit_dependencies $(BUILD_DIR)
+	$(CXX) -std=$(CPPSTD) $(CXXFLAGS) $(CPPFLAGS) $(IMPLICIT_INCLUDES) -MMD -MP -MF $(@:.bin=.d) $< $(OPENMP_FLAGS) -o $@
+
+$(BUILD_DIR)/ode_benchmarks_cpu_omp.bin: tests/ode_benchmarks.cpp Makefile $(BENCHMARK_CONFIG) | check_implicit_dependencies $(BUILD_DIR)
+	$(CXX) -std=$(CPPSTD) $(CXXFLAGS) $(CPPFLAGS) $(IMPLICIT_INCLUDES) -DTEST_VECTOR_BACKEND_OMP -MMD -MP -MF $(@:.bin=.d) $< $(OPENMP_FLAGS) -o $@
+
+$(BUILD_DIR)/ode_benchmarks_cuda.o: tests/ode_benchmarks.cpp Makefile $(BENCHMARK_CONFIG) | check_implicit_dependencies $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) $(CPPFLAGS) $(IMPLICIT_INCLUDES) -DTEST_VECTOR_BACKEND_CUDA -MMD -MP -MF $(@:.o=.d) -x cu -c $< -o $@
+
+$(BUILD_DIR)/ode_benchmarks_reductions.o: $(NMFD_OPERATIONS_ROOT)/include/nmfd/operations/blas1/high_precision/cuda/gpu_reduction_ogita_kernels.cu Makefile $(BENCHMARK_CONFIG) | check_dependencies $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) $(INCLUDES) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+
+$(BUILD_DIR)/ode_benchmarks_cuda.bin: $(BUILD_DIR)/ode_benchmarks_cuda.o $(BUILD_DIR)/ode_benchmarks_reductions.o
+	$(NVCC) $(NVCCFLAGS) $^ -lcublas -lcurand -o $@
+
+-include $(wildcard $(BUILD_DIR)/ode_benchmarks_*.d)
 
 test_tables: $(TABLE_BINS)
 	@set -e; for test in $(TABLE_BINS); do "$$test"; done

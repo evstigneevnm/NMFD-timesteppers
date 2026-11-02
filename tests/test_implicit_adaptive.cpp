@@ -533,6 +533,7 @@ try
     test_estimators();
     test_controller<integration::time_step_adaptation_matlab<operations_type>>( "MATLAB" );
     test_controller<integration::time_step_adaptation_scipy<operations_type>>( "SciPy" );
+    test_controller<integration::time_step_adaptation_filter<operations_type>>( "PID filter" );
     test_storage();
     std::cout << "Adaptive DIRK estimators, accuracy, recovery, rollback and storage: PASS\n";
 }
