@@ -12,7 +12,8 @@ try
         std::size_t  stages;
         unsigned int order, embedded_order;
     } methods[] = { { "IE", 1, 1, 0 },         { "IM", 1, 2, 0 },          { "CN", 2, 2, 0 },
-                    { "SDIRK2(1)2", 2, 2, 1 }, { "ESDIRK2(1)3", 3, 2, 1 }, { "SDIRK3(1)3", 3, 3, 1 } };
+                    { "SDIRK2(1)2", 2, 2, 1 }, { "ESDIRK2(1)3", 3, 2, 1 }, { "SDIRK3(1)3", 3, 3, 1 },
+                    { "ARK324L2SA", 4, 3, 2 } };
 
     for ( const auto &method : methods )
     {
@@ -32,6 +33,7 @@ try
     }
     require( make_butcher_table( "CN" ).type() == butcher_table::scheme_type::dirk, "CN classification" );
     require( make_butcher_table( "SDIRK3(1)3" ).error_order() == 2, "SDIRK3(1)3 error scales as h^2" );
+    require( make_butcher_table( "ARK324L2SA" ).error_order() == 3, "ARK324L2SA error scales as h^3" );
 
     const struct
     {

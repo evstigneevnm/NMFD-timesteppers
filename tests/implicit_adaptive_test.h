@@ -17,6 +17,7 @@ template <class Controller>
 struct observed_controller : Controller
 {
     using Controller::Controller;
+    unsigned int expected_order = 2;
     unsigned int assessments = 0, error_rejections = 0, numerical_rejections = 0, commits = 0;
 
     void reset()
@@ -29,7 +30,7 @@ struct observed_controller : Controller
         const vector_type *error = nullptr
     )
     {
-        require( error && order == 2, "DIRK assessment lost its state error or scaling exponent" );
+        require( error && order == expected_order, "DIRK assessment lost its state error or scaling exponent" );
         ++assessments;
         const auto result = Controller::assess( t, h, in, out, next, order, error );
         error_rejections += result == adaptation_status::rejected;

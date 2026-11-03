@@ -167,6 +167,29 @@ inline butcher_table make_butcher_table( const std::string &name )
                  { .5L - b2, b2, .5L },
                  1 };
     }
+    if ( name == "ARK324L2SA" )
+    {
+        // Implicit ARK3(2)4L[2]SA: Kennedy-Carpenter, four-stage ESDIRK 3(2).
+        // Coefficients: LLNL/sundials src/arkode/arkode_butcher_dirk.def,
+        // ARKODE_ARK324L2SA_DIRK_4_2_3 (high-precision representation).
+        const auto                       g = .4358665215084589994160194511935568425293L;
+        const butcher_table::vector_type b{
+            .1876410243467238251612921441668043913795L, -.5952974735769549480478230275858851737782L,
+            .9717899277217721234705114322255239398694L, g
+        };
+        return {
+            { { 0, 0, 0, 0 },
+              { g, g, 0, 0 },
+              { .2576482460664272457999960162840797092643L, -.09351476757488624521601546747763655179361L, g, 0 },
+              b },
+            b,
+            3,
+            { 0, 2 * g, .6L, 1 },
+            { .2147402862233891404862383406484193714659L, -.4851622638849390928209050808398155895845L,
+              .86872500252038755116621237682951240796L, .4016969751411624011684543633618838101586L },
+            2
+        };
+    }
     throw std::invalid_argument( "Unknown RK scheme: " + name );
 }
 

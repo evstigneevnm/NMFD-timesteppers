@@ -17,15 +17,30 @@ namespace tests
 // Exact solution: u=(exp(-t),exp(-2*t)); verifies coupled stages without mass inversion.
 struct coupled_mass
 {
-    static constexpr int size = 2;
-    __DEVICE_TAG__ void  residual(
-         double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
-         vector_type &out
-     ) const
+    static constexpr int         size = 2;
+    __DEVICE_TAG__ static double rhs0( double u, double v )
+    {
+        return -2 * u - 2 * v;
+    }
+    __DEVICE_TAG__ static double rhs1( double u, double v )
+    {
+        return -u - 6 * v;
+    }
+    __DEVICE_TAG__ void rate( double, const vector_type &x, vector_type &out ) const
+    {
+        const auto f0 = rhs0( x( 0 ), x( 1 ) ), f1 = rhs1( x( 0 ), x( 1 ) );
+        // Analytical solve of [[2,1],[1,3]]*k=f, not a return of the raw RHS.
+        out( 0 ) = ( 3 * f0 - f1 ) / 5;
+        out( 1 ) = ( 2 * f1 - f0 ) / 5;
+    }
+    __DEVICE_TAG__ void residual(
+        double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
+        vector_type &out
+    ) const
     {
         const auto d0 = x( 0 ) - previous( 0 ), d1 = x( 1 ) - previous( 1 );
-        out( 0 ) = scaling.mass * ( 2 * d0 + d1 ) + scaling.rhs * ( 2 * x( 0 ) + 2 * x( 1 ) - rhs( 0 ) );
-        out( 1 ) = scaling.mass * ( d0 + 3 * d1 ) + scaling.rhs * ( x( 0 ) + 6 * x( 1 ) - rhs( 1 ) );
+        out( 0 ) = scaling.mass * ( 2 * d0 + d1 ) - scaling.rhs * ( rhs0( x( 0 ), x( 1 ) ) + rhs( 0 ) );
+        out( 1 ) = scaling.mass * ( d0 + 3 * d1 ) - scaling.rhs * ( rhs1( x( 0 ), x( 1 ) ) + rhs( 1 ) );
     }
     auto jacobian(
         double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 2> &,
@@ -44,14 +59,26 @@ struct coupled_mass
 // The stage residual is nonlinear, and its Jacobian must include the mass derivative.
 struct variable_mass
 {
-    static constexpr int size = 1;
-    __DEVICE_TAG__ void  residual(
-         double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
-         vector_type &out
-     ) const
+    static constexpr int         size = 1;
+    __DEVICE_TAG__ static double mass( double u )
+    {
+        return 1 + u * u;
+    }
+    __DEVICE_TAG__ static double physical_rhs( double u )
+    {
+        return -mass( u ) * u;
+    }
+    __DEVICE_TAG__ void rate( double, const vector_type &x, vector_type &out ) const
+    {
+        out( 0 ) = physical_rhs( x( 0 ) ) / mass( x( 0 ) );
+    }
+    __DEVICE_TAG__ void residual(
+        double, const stage_scaling &scaling, const vector_type &x, const vector_type &previous, const vector_type &rhs,
+        vector_type &out
+    ) const
     {
         const auto u = x( 0 );
-        out( 0 ) = ( 1 + u * u ) * ( scaling.mass * ( u - previous( 0 ) ) + scaling.rhs * u ) - scaling.rhs * rhs( 0 );
+        out( 0 ) = scaling.mass * mass( u ) * ( u - previous( 0 ) ) - scaling.rhs * ( physical_rhs( u ) + rhs( 0 ) );
     }
     auto jacobian(
         double, const stage_scaling &scaling, const scfd::static_vec::vec<double, 1> &x,
@@ -100,14 +127,25 @@ struct coupled_dae
 // Exact solution (x,z)=(exp(-t),exp(-t)*sin(t)); verifies stage times and endpoint consistency.
 struct moving_constraint_dae
 {
-    static constexpr int size = 2;
-    __DEVICE_TAG__ void  residual(
-         double t, const stage_scaling &scaling, const vector_type &x, const vector_type &previous,
-         const vector_type &rhs, vector_type &out
-     ) const
+    static constexpr int         size = 2;
+    __DEVICE_TAG__ static double differential_rhs( double t, double x, double z )
     {
-        out( 0 ) = scaling.mass * ( x( 0 ) - previous( 0 ) ) +
-                   scaling.rhs * ( ( 1 - std::sin( t ) ) * x( 0 ) + x( 1 ) - rhs( 0 ) );
+        return -x - z + std::sin( t ) * x;
+    }
+    __DEVICE_TAG__ void rate( double t, const vector_type &x, vector_type &out ) const
+    {
+        const auto dx = differential_rhs( t, x( 0 ), x( 1 ) );
+        out( 0 )      = dx;
+        // Differentiate z=sin(t)*x; the algebraic rate is generally nonzero.
+        out( 1 ) = std::cos( t ) * x( 0 ) + std::sin( t ) * dx;
+    }
+    __DEVICE_TAG__ void residual(
+        double t, const stage_scaling &scaling, const vector_type &x, const vector_type &previous,
+        const vector_type &rhs, vector_type &out
+    ) const
+    {
+        out( 0 ) = scaling.mass * ( x( 0 ) - previous( 0 ) ) -
+                   scaling.rhs * ( differential_rhs( t, x( 0 ), x( 1 ) ) + rhs( 0 ) );
         out( 1 ) = x( 1 ) - std::sin( t ) * x( 0 ) - rhs( 1 );
     }
     auto jacobian(

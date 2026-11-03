@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
+#include <nmfd/time_steppers/detail/evaluation_mode.h>
 #include <nmfd/time_steppers/detail/status.h>
 #include <nmfd/time_steppers/runge_kutta/butcher_tables.h>
 
@@ -22,6 +23,24 @@ namespace runge_kutta
 {
 namespace detail
 {
+template <class Problem, class Vector, class = void>
+struct has_rate_evaluation : std::false_type
+{
+};
+
+template <class Problem, class Vector>
+struct has_rate_evaluation<
+    Problem, Vector,
+    std::void_t<decltype( std::declval<Problem &>().apply(
+        std::declval<const Vector &>(), std::declval<Vector &>(), evaluation_mode::rate
+    ) )>>
+    : std::is_same<
+          decltype( std::declval<Problem &>()
+                        .apply( std::declval<const Vector &>(), std::declval<Vector &>(), evaluation_mode::rate ) ),
+          bool>
+{
+};
+
 template <class Adaptation, class Vector, class T, class = void>
 struct has_embedded_assessment : std::false_type
 {
@@ -96,7 +115,7 @@ public:
     {
     }
 
-    // Validate a nonzero-diagonal DIRK table, allocate reusable workspace,
+    // Validate a DIRK table and optional rate support, allocate reusable workspace,
     // and bind the nonlinear solver to the problem.
     implicit_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
@@ -115,10 +134,10 @@ public:
     {
         if ( p.maximum_attempts == 0 )
             throw std::invalid_argument( "Empty DIRK attempt budget" );
+        if ( table_.type() == butcher_table::scheme_type::explicit_rk )
+            throw std::invalid_argument( "Use the explicit stepper for an entirely explicit table" );
         for ( std::size_t i = 0; i < table_.size(); ++i )
         {
-            if ( table_.a( i, i ) == 0 )
-                throw std::invalid_argument( "DIRK requires nonzero diagonal stages" );
             for ( std::size_t j = i + 1; j < table_.size(); ++j )
                 if ( table_.a( i, j ) != 0 )
                     throw std::invalid_argument( "DIRK requires a lower-triangular table" );
@@ -126,10 +145,15 @@ public:
         stiffly_accurate_ = true;
         for ( std::size_t i = 0; i < table_.size(); ++i )
             stiffly_accurate_ = stiffly_accurate_ && table_.a( table_.size() - 1, i ) == table_.b( i );
-        work_.init();
-        work_.start_use();
         if constexpr ( detail::has_embedded_assessment<TimeStepAdaptation, vector_type, scalar_type>::value )
             estimate_error_ = adaptation_->requires_error_estimate() && table_.is_embedded();
+        for ( std::size_t i = 0; i < table_.size(); ++i )
+            if ( table_.a( i, i ) == 0 && needs_rate( i ) && !detail::has_rate_evaluation<Problem, vector_type>::value )
+                throw std::invalid_argument(
+                    "Zero-diagonal stages require bool apply(state, rate, evaluation_mode::rate)"
+                );
+        work_.init();
+        work_.start_use();
         if ( estimate_error_ )
         {
             error_.init();
@@ -294,6 +318,18 @@ private:
     bool                                initialized_ = false, pending_ = false;
     single_step_status                  status_ = single_step_status::idle;
 
+    // A dummy explicit stage needs no derivative unless later stages, the
+    // primary endpoint or the configured embedding actually consume it.
+    bool needs_rate( std::size_t i ) const
+    {
+        if ( ( !stiffly_accurate_ && table_.b( i ) != 0 ) || ( estimate_error_ && table_.error_b( i ) != 0 ) )
+            return true;
+        for ( std::size_t j = i + 1; j < table_.size(); ++j )
+            if ( table_.a( j, i ) != 0 )
+                return true;
+        return false;
+    }
+
     // Reject operations that would overwrite an unfinalized candidate.
     void require_finalized() const
     {
@@ -311,7 +347,7 @@ private:
     }
 
     // Perform one DIRK attempt: assemble stage references, times, and shifts,
-    // solve the coupled stage residuals, and reconstruct the endpoint in work_.
+    // solve implicit stages or evaluate explicit rates, and reconstruct work_.
     // Return false with a numerical failure status; do not assess or commit.
     bool compute( const vector_type &in )
     {
@@ -320,10 +356,10 @@ private:
         operations_->assign_scalar( scalar_type( 0 ), rhs );
         for ( std::size_t i = 0; i < table_.size(); ++i )
         {
-            const auto alpha = scalar_type( 1 ) / ( dt_ * scalar_type( table_.a( i, i ) ) );
+            const bool store_rate = i < rates_.size() && ( table_.a( i, i ) != 0 || needs_rate( i ) );
             const auto stage_time =
                 time_ + dt_ * scalar_type( stiffly_accurate_ && i + 1 == table_.size() ? 1 : table_.c( i ) );
-            if ( !std::isfinite( alpha ) || !std::isfinite( stage_time ) )
+            if ( !std::isfinite( stage_time ) )
             {
                 status_ = single_step_status::failed_nonfinite;
                 return false;
@@ -338,27 +374,46 @@ private:
                 return false;
             }
             problem_->set_time( stage_time );
-            problem_->set_affine_shift( alpha );
             operations_->assign( previous, *work_ );
-            if ( !solver_->solve( *work_ ) )
+            if ( table_.a( i, i ) == 0 )
             {
-                status_ = single_step_status::failed_solver;
-                return false;
+                // Construction requires the overload only for rates that are used.
+                if constexpr ( detail::has_rate_evaluation<Problem, vector_type>::value )
+                    if ( store_rate && !problem_->apply( *work_, *rates_[i], evaluation_mode::rate ) )
+                    {
+                        status_ = single_step_status::failed_solver;
+                        return false;
+                    }
             }
-            if ( !operations_->is_valid_number( *work_ ) )
+            else
             {
-                status_ = single_step_status::failed_nonfinite;
-                return false;
-            }
-            if ( i < rates_.size() )
-            {
-                operations_->assign_lin_comb( scalar_type( 1 ), *work_, scalar_type( -1 ), previous, *rates_[i] );
-                operations_->scale( alpha, *rates_[i] );
-                if ( !operations_->is_valid_number( *rates_[i] ) )
+                const auto alpha = scalar_type( 1 ) / ( dt_ * scalar_type( table_.a( i, i ) ) );
+                if ( !std::isfinite( alpha ) )
                 {
                     status_ = single_step_status::failed_nonfinite;
                     return false;
                 }
+                problem_->set_affine_shift( alpha );
+                if ( !solver_->solve( *work_ ) )
+                {
+                    status_ = single_step_status::failed_solver;
+                    return false;
+                }
+                if ( !operations_->is_valid_number( *work_ ) )
+                {
+                    status_ = single_step_status::failed_nonfinite;
+                    return false;
+                }
+                if ( store_rate )
+                {
+                    operations_->assign_lin_comb( scalar_type( 1 ), *work_, scalar_type( -1 ), previous, *rates_[i] );
+                    operations_->scale( alpha, *rates_[i] );
+                }
+            }
+            if ( store_rate && !operations_->is_valid_number( *rates_[i] ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
             }
         }
         if ( !stiffly_accurate_ )

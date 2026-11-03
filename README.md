@@ -98,11 +98,11 @@ not an extra initial derivative evaluation.
 
 ## Implicit RK
 
-`runge_kutta/implicit_time_step.h` executes any lower-triangular RK table with
-nonzero diagonal stages, including IE, IM, SDIRK2(1)2, SDIRK3(1)3, and user-supplied
-DIRK tables. The constructor accepts a method name through `params`, or a
-`butcher_table` directly. Coupled IRK and zero-diagonal stages (CN/ESDIRK) are
-rejected in this implementation.
+`runge_kutta/implicit_time_step.h` executes lower-triangular implicit RK tables,
+including IE, IM, CN, SDIRK2(1)2, ESDIRK2(1)3, SDIRK3(1)3, ARK324L2SA and
+user-supplied DIRK tables. The constructor accepts a method name through `params`,
+or a `butcher_table` directly. Coupled IRK is rejected; entirely explicit tables
+belong to the explicit engine. Existing nonzero-diagonal problems need no changes.
 
 The problem owns `previous_state()` and `known_rhs()` buffers and supplies:
 
@@ -138,18 +138,62 @@ accuracy budget. Future globalization must measure progress in the original
 physical residual and constraints, not compare scaled norms across stage shifts.
 
 For stage i the stepper writes `previous=u_n+h*sum(a_ij*k_j)` and `known_rhs=0`,
-then sets `alpha=1/(h*a_ii)` and `time=t_n+c_i*h`. The supplied nonlinear solver is
+then sets `time=t_n+c_i*h`. Nonzero diagonals use `alpha=1/(h*a_ii)` and the
+existing stage residual. The supplied nonlinear solver is
 bound once through `set_nonlinear_operator(problem)` and called with
 `solve(stage_state)`. It must not be rebound or shared between concurrent
 trajectories. No Newton headers are needed by the stepper itself.
 
-There is no mass inversion. For singular-mass DAEs, provide consistent initial
+Nonzero-diagonal stages require no mass inversion. For singular-mass DAEs, provide consistent initial
 data and a suitable coupled stage solver/preconditioner. The tests use stiffly
 accurate methods, committing the final stage directly to preserve its algebraic
 constraints. The DAE regressions include a nonlinear index-1 system and a small
 index-2 Stokes saddle system with a pressure multiplier. Other DIRK formulas are
 not automatically appropriate for every DAE.
 An external manager modifying a DAE endpoint must preserve/reconstruct consistency.
+
+Zero-diagonal stages have their state already determined by `previous`. If their
+rate is consumed by another stage, the endpoint, or the configured estimator,
+the problem must additionally provide this optional overload:
+
+```cpp
+#include <nmfd/time_steppers/detail/evaluation_mode.h>
+bool apply(const vector_type& state, vector_type& rate,
+           nmfd::time_steppers::evaluation_mode mode);
+```
+
+There is no default mode argument: two-argument calls remain residual evaluations.
+With `mode=evaluation_mode::rate`, use the time supplied by `set_time()` and
+produce the physical derivative satisfying `M(t,state)*rate=f(t,state)`, not the
+raw RHS or the shift-scaled residual. Ignore affine-shift data and do not modify
+the input, stage buffers or prepared Jacobian. The problem owns any mass solver,
+its accuracy settings and reusable backend workspace. Return `false` on numerical
+failure; the stepper discards the rate, shrinks/retries when allowed, and leaves
+the caller's output unchanged on failure. Nonfinite rates are rejected separately;
+backend/configuration exceptions propagate. Missing rate support is rejected
+during construction when the selected table/controller needs it. Unused dummy
+rates need no provider. No rates are cached across attempts or committed steps.
+
+For singular mass, provide a formulation-specific complete consistent derivative,
+including differentiated constraints and gauges where required. The tests supply
+the moving index-1 constraint's nonzero algebraic rate, but deliberately refuse
+ESDIRK for the existing index-2 Stokes problem without such a provider. This is
+not automatic support for arbitrary DAEs. The pure explicit engine has not yet
+been connected to this optional overload; IMEX execution remains deferred.
+
+`ARK324L2SA` is the implicit four-stage Kennedy-Carpenter ARK3(2)4L[2]SA pair:
+third-order primary and second-order embedding, with controller exponent three.
+Coefficients follow the high-precision representation in
+[SUNDIALS](https://github.com/LLNL/sundials/blob/main/src/arkode/arkode_butcher_dirk.def).
+Rooted-tree tests verify both orders. CN has no embedded estimator and continues
+to refuse error-requiring controllers instead of inventing an estimate.
+
+The separate `test_implicit_esdirk`, `test_implicit_esdirk_adaptive` and
+`test_implicit_esdirk_mass_dae` executables check overload compatibility, stage
+times (including interior explicit stages), rejection/rollback, primary and
+embedded orders, all filter presets, MATLAB/SciPy adaptation, coupled/state/time-
+dependent mass, consistent constraints, backward integration and restart. Parent
+CI covers serial/OpenMP, capability-gated CUDA and sanitizers.
 
 The stepper owns one stage-state vector and s-1 rates for stiffly accurate methods,
 or s rates otherwise. An error-requiring controller with an embedded table adds
