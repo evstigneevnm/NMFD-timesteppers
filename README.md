@@ -154,16 +154,14 @@ An external manager modifying a DAE endpoint must preserve/reconstruct consisten
 
 Zero-diagonal stages have their state already determined by `previous`. If their
 rate is consumed by another stage, the endpoint, or the configured estimator,
-the problem must additionally provide this optional overload:
+the problem must additionally provide this optional method:
 
 ```cpp
-#include <nmfd/time_steppers/detail/evaluation_mode.h>
-bool apply(const vector_type& state, vector_type& rate,
-           nmfd::time_steppers::evaluation_mode mode);
+bool evaluate_rate(const vector_type& state, vector_type& rate);
 ```
 
-There is no default mode argument: two-argument calls remain residual evaluations.
-With `mode=evaluation_mode::rate`, use the time supplied by `set_time()` and
+The two-argument `apply()` remains exclusively a residual evaluation.
+In `evaluate_rate()`, use the time supplied by `set_time()` and
 produce the physical derivative satisfying `M(t,state)*rate=f(t,state)`, not the
 raw RHS or the shift-scaled residual. Ignore affine-shift data and do not modify
 the input, stage buffers or prepared Jacobian. The problem owns any mass solver,
@@ -179,7 +177,7 @@ including differentiated constraints and gauges where required. The tests supply
 the moving index-1 constraint's nonzero algebraic rate, but deliberately refuse
 ESDIRK for the existing index-2 Stokes problem without such a provider. This is
 not automatic support for arbitrary DAEs. The pure explicit engine has not yet
-been connected to this optional overload; IMEX execution remains deferred.
+been connected to this optional method; IMEX execution remains deferred.
 
 `ARK324L2SA` is the implicit four-stage Kennedy-Carpenter ARK3(2)4L[2]SA pair:
 third-order primary and second-order embedding, with controller exponent three.
@@ -189,7 +187,7 @@ Rooted-tree tests verify both orders. CN has no embedded estimator and continues
 to refuse error-requiring controllers instead of inventing an estimate.
 
 The separate `test_implicit_esdirk`, `test_implicit_esdirk_adaptive` and
-`test_implicit_esdirk_mass_dae` executables check overload compatibility, stage
+`test_implicit_esdirk_mass_dae` executables check residual/rate separation, stage
 times (including interior explicit stages), rejection/rollback, primary and
 embedded orders, all filter presets, MATLAB/SciPy adaptation, coupled/state/time-
 dependent mass, consistent constraints, backward integration and restart. Parent
@@ -215,7 +213,7 @@ committed, never the embedded state. Select the controller's error requirement
 before constructing the stepper. Error-free custom controllers retain their
 five-argument `assess()` interface. IE/IM report `error_estimate_unavailable`
 with error-requiring controllers; no step-doubling estimator is implied.
-Implicit dense output and zero-diagonal stages remain deferred.
+Implicit dense output remains deferred.
 
 `test_implicit_adaptive.cpp` checks independent scalar stage/error formulas,
 primary and embedded orders, MATLAB/SciPy/PID tolerance refinement, nonlinear decay,

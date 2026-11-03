@@ -11,7 +11,6 @@
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
-#include <nmfd/time_steppers/detail/evaluation_mode.h>
 #include <nmfd/time_steppers/detail/status.h>
 #include <nmfd/time_steppers/runge_kutta/butcher_tables.h>
 
@@ -31,12 +30,11 @@ struct has_rate_evaluation : std::false_type
 template <class Problem, class Vector>
 struct has_rate_evaluation<
     Problem, Vector,
-    std::void_t<decltype( std::declval<Problem &>().apply(
-        std::declval<const Vector &>(), std::declval<Vector &>(), evaluation_mode::rate
-    ) )>>
+    std::void_t<decltype( std::declval<Problem &>()
+                              .evaluate_rate( std::declval<const Vector &>(), std::declval<Vector &>() ) )>>
     : std::is_same<
           decltype( std::declval<Problem &>()
-                        .apply( std::declval<const Vector &>(), std::declval<Vector &>(), evaluation_mode::rate ) ),
+                        .evaluate_rate( std::declval<const Vector &>(), std::declval<Vector &>() ) ),
           bool>
 {
 };
@@ -149,9 +147,7 @@ public:
             estimate_error_ = adaptation_->requires_error_estimate() && table_.is_embedded();
         for ( std::size_t i = 0; i < table_.size(); ++i )
             if ( table_.a( i, i ) == 0 && needs_rate( i ) && !detail::has_rate_evaluation<Problem, vector_type>::value )
-                throw std::invalid_argument(
-                    "Zero-diagonal stages require bool apply(state, rate, evaluation_mode::rate)"
-                );
+                throw std::invalid_argument( "Zero-diagonal stages require bool evaluate_rate(state, rate)" );
         work_.init();
         work_.start_use();
         if ( estimate_error_ )
@@ -377,9 +373,9 @@ private:
             operations_->assign( previous, *work_ );
             if ( table_.a( i, i ) == 0 )
             {
-                // Construction requires the overload only for rates that are used.
+                // Construction requires evaluate_rate() only for rates that are used.
                 if constexpr ( detail::has_rate_evaluation<Problem, vector_type>::value )
-                    if ( store_rate && !problem_->apply( *work_, *rates_[i], evaluation_mode::rate ) )
+                    if ( store_rate && !problem_->evaluate_rate( *work_, *rates_[i] ) )
                     {
                         status_ = single_step_status::failed_solver;
                         return false;

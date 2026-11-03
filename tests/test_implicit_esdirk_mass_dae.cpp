@@ -24,7 +24,7 @@ void test_mass( const char *label )
     const auto end   = exact_state<Equation>( .65 );
     operations->set( start.d, *initial, Equation::size );
     problem->set_time( .25 );
-    require( problem->apply( *initial, *out, evaluation_mode::rate ), "Manufactured mass rate solve failed" );
+    require( problem->evaluate_rate( *initial, *out ), "Manufactured mass rate solve failed" );
     for ( int i = 0; i < Equation::size; ++i )
     {
         const double expected = std::is_same_v<Equation, moving_constraint_dae> && i == 1

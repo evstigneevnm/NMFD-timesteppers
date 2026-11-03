@@ -9,7 +9,7 @@ namespace time_steppers
 {
 namespace tests
 {
-// Opt-in test facade: retain the ordinary residual overload and use the same
+// Opt-in test facade: retain ordinary residual evaluation and use the same
 // equation's physical rate kernel. No mass solve is performed by the stepper.
 template <class Equation>
 class rate_problem : public stage_problem<Equation>
@@ -17,7 +17,6 @@ class rate_problem : public stage_problem<Equation>
     using base_type = stage_problem<Equation>;
 
 public:
-    using base_type::apply;
     using base_type::base_type;
     unsigned int        rate_calls = 0;
     std::vector<double> rate_times, implicit_times;
@@ -38,7 +37,7 @@ public:
             equation.rate( time, state, rate );
         }
     };
-    bool apply( const vector_type &state, vector_type &rate, evaluation_mode )
+    bool evaluate_rate( const vector_type &state, vector_type &rate )
     {
         ++rate_calls;
         rate_times.push_back( this->time );

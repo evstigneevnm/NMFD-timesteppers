@@ -13,7 +13,7 @@ using equation_type = rate_scalar_equation<coefficient_growth<double>>;
 using problem_type  = rate_problem<equation_type>;
 using types         = newton_types<problem_type>;
 
-void test_overloads_and_stages()
+void test_rate_and_stages()
 {
     auto             operations = std::make_shared<operations_type>( 1 );
     auto             problem    = std::make_shared<problem_type>( operations );
@@ -27,10 +27,10 @@ void test_overloads_and_stages()
     problem->set_time( .3 );
     problem->set_affine_shift( 7 );
     problem->apply( *state, *before );
-    require( problem->apply( *state, *out, evaluation_mode::rate ), "Rate overload failed" );
+    require( problem->evaluate_rate( *state, *out ), "Rate evaluation failed" );
     require(
         std::abs( operations->get_value_at_point( 0, *out ) - .3 ) < 1e-14,
-        "Rate overload used the affine shift or known RHS"
+        "Rate evaluation used the affine shift or known RHS"
     );
     problem->apply( *state, *out );
     require(
@@ -89,7 +89,6 @@ void test_overloads_and_stages()
 
 struct failing_problem : problem_type
 {
-    using problem_type::apply;
     std::shared_ptr<operations_type> operations;
     unsigned int                     failures = 0, calls = 0;
     bool                             nonfinite = false, throw_error = false;
@@ -97,7 +96,7 @@ struct failing_problem : problem_type
         : problem_type( ops ), operations( std::move( ops ) )
     {
     }
-    bool apply( const vector_type &state, vector_type &out, evaluation_mode mode )
+    bool evaluate_rate( const vector_type &state, vector_type &out )
     {
         ++calls;
         if ( throw_error )
@@ -112,7 +111,7 @@ struct failing_problem : problem_type
             operations->assign_scalar( std::numeric_limits<double>::quiet_NaN(), out );
             return true;
         }
-        return problem_type::apply( state, out, mode );
+        return problem_type::evaluate_rate( state, out );
     }
 };
 
@@ -283,7 +282,7 @@ void test_optional_capability()
 
 struct invalid_rate_signature
 {
-    void apply( const vector_type &, vector_type &, evaluation_mode );
+    void evaluate_rate( const vector_type &, vector_type & );
 };
 
 int main()
@@ -293,11 +292,12 @@ try
     static_assert( runge_kutta::detail::has_rate_evaluation<problem_type, vector_type>::value );
     static_assert( !runge_kutta::detail::has_rate_evaluation<stage_problem<equation_type>, vector_type>::value );
     static_assert( !runge_kutta::detail::has_rate_evaluation<invalid_rate_signature, vector_type>::value );
-    test_overloads_and_stages();
+    static_assert( std::is_same_v<decltype( &problem_type::apply ), decltype( &stage_problem<equation_type>::apply )> );
+    test_rate_and_stages();
     test_failure_and_lifecycle();
     test_unavailable_estimate();
     test_optional_capability();
-    std::cout << "CN/ESDIRK rate overloads, timed/interior stages, failures and commitment: PASS\n";
+    std::cout << "CN/ESDIRK rate evaluation, timed/interior stages, failures and commitment: PASS\n";
 }
 catch ( const std::exception &error )
 {
