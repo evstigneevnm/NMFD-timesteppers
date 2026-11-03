@@ -193,10 +193,10 @@ embedded orders, all filter presets, MATLAB/SciPy adaptation, coupled/state/time
 dependent mass, consistent constraints, backward integration and restart. Parent
 CI covers serial/OpenMP, capability-gated CUDA and sanitizers.
 
-The stepper owns one stage-state vector and s-1 rates for stiffly accurate methods,
+With dense output disabled, the stepper owns one stage-state vector and s-1 rates for stiffly accurate methods,
 or s rates otherwise. An error-requiring controller with an embedded table adds
 one state-error buffer and, when needed, the previously omitted endpoint rate.
-Constant-step methods allocate neither addition. Dense-output storage is absent.
+Constant-step methods allocate neither addition. Dense-output storage is absent when disabled.
 Scratch is reused across stages and trajectories; `apply()` publishes only a
 successful candidate. The existing integrator commits through `finalize()`.
 Failed solves report `failed_solver`; custom adaptation may retry via
@@ -213,7 +213,7 @@ committed, never the embedded state. Select the controller's error requirement
 before constructing the stepper. Error-free custom controllers retain their
 five-argument `assess()` interface. IE/IM report `error_estimate_unavailable`
 with error-requiring controllers; no step-doubling estimator is implied.
-Implicit dense output remains deferred.
+Dense output is optional as described below.
 
 `test_implicit_adaptive.cpp` checks independent scalar stage/error formulas,
 primary and embedded orders, MATLAB/SciPy/PID tolerance refinement, nonlinear decay,
@@ -304,7 +304,7 @@ workflow jobs run these tests.
 
 ## Dense Output
 
-Enable interpolation using the fourth template argument; the default remains off:
+Enable explicit interpolation using the fourth template argument; the default remains off:
 
 ```cpp
 using step_type = nmfd::time_steppers::runge_kutta::explicit_time_step<
@@ -345,6 +345,60 @@ Evaluation needs no new vectors or RHS calls; it reuses the pending stages and
 endpoint. With dense output disabled, no dense vectors or extra RHS calls exist.
 These interpolants apply to explicit ODE/reduced-flow formulations, not arbitrary
 algebraic DAE states.
+
+### Implicit Dense Output
+
+Enable the fifth template argument; all existing four-argument uses remain valid:
+
+```cpp
+using step_type = nmfd::time_steppers::runge_kutta::implicit_time_step<
+    vector_operations_type, problem_type, adaptation_type, nonlinear_solver_type, true>;
+auto dense = step.get_continuous_integration(); // after successful apply(), before finalize()
+const auto sample_time = dense.evaluate(theta, sample);
+```
+
+| Method | Extension | Dense order | Additional consistent-rate calls |
+| --- | --- | --- | --- |
+| IE | Linear | 1 | 0 |
+| IM | Quadratic with initial derivative | 2 | 1 |
+| CN, SDIRK2(1)2, ESDIRK2(1)3 | Quadratic using stored stages | 2 | 0 |
+| SDIRK3(1)3 | Endpoint cubic Hermite | 3 | 1 |
+| ARK324L2SA | Endpoint cubic Hermite, reusing the first stage | 3 | 0 |
+
+The additional derivative is evaluated at `(t_n,u_n)` through the optional
+`bool Problem::evaluate_rate(state, rate)`, including the appropriate mass solve
+or complete consistent DAE derivative. Missing required support is rejected during
+construction. Custom tables must provide their own continuous extension; no
+unreported fallback is invented. Coefficients are checked against rooted-tree
+continuous-order conditions, not merely scalar test equations.
+
+Enabled storage is one work vector, all ordinary and additional extension rates,
+one initial-state snapshot, and the error vector only when configured. This
+retains the endpoint derivative otherwise omitted for stiffly accurate methods.
+Extra rate stages run only after error acceptance, before publishing the candidate.
+Failures/nonfinite rates follow bounded numerical rejection; backend exceptions
+propagate. Preparation restores the final prepared stage time (the midpoint for
+IM), without changing its reference/RHS buffers or Jacobian. Dense evaluation uses
+stored rates only, allocates no vectors, and makes no problem calls or vector-sized
+device/host transfers. Disabled storage and rate-call budgets are unchanged.
+
+Views have the same pending-step lifetime as explicit RK, including rejection,
+reset, modified/shortened endpoints and failed external commits. Sampling either
+endpoint copies the saved numerical state exactly. Adaptive control still targets
+the step error, not an independently estimated interior error.
+
+For DAEs, raw polynomial samples need not satisfy algebraic constraints. The
+application or external manager must perform formulation-specific reconstruction
+at `sample_time` before constrained event evaluation/commit. The tests demonstrate
+nonlinear and moving index-1 constraints with problem-owned reconstruction and
+rollback on its failure. They do not establish arbitrary DAE algebraic order.
+No additional mandatory problem or integration callbacks are introduced.
+
+`test_implicit_dense_output`, `test_implicit_dense_lifecycle`, and
+`test_implicit_dense_mass_dae` cover local/global interior order, non-autonomous
+and backward sampling, unchanged adaptation, storage and construction failures,
+view expiry, section refinement, mass systems and constrained reconstruction.
+Parent CI runs these on serial/OpenMP, capability-gated CUDA and ASan/UBSan.
 
 ## Tests
 

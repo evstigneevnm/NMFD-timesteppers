@@ -13,6 +13,7 @@
 #include <nmfd/detail/vector_wrap.h>
 #include <nmfd/time_steppers/detail/status.h>
 #include <nmfd/time_steppers/runge_kutta/butcher_tables.h>
+#include <nmfd/time_steppers/runge_kutta/continuous_integration.h>
 
 namespace nmfd
 {
@@ -22,6 +23,24 @@ namespace runge_kutta
 {
 namespace detail
 {
+template <class VectorOperations, bool Enabled>
+struct implicit_dense_storage
+{
+    explicit implicit_dense_storage( const VectorOperations & )
+    {
+    }
+};
+
+template <class VectorOperations>
+struct implicit_dense_storage<VectorOperations, true>
+{
+    nmfd::detail::vector_wrap<VectorOperations, false, false> previous;
+
+    explicit implicit_dense_storage( const VectorOperations &operations ) : previous( operations )
+    {
+    }
+};
+
 template <class Problem, class Vector, class = void>
 struct has_rate_evaluation : std::false_type
 {
@@ -83,7 +102,8 @@ struct has_implicit_stage_interface<
 };
 }
 
-template <class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver>
+template <
+    class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false>
 class implicit_time_step
 {
 public:
@@ -128,12 +148,16 @@ public:
               adaptation ? std::move( adaptation ) : throw std::invalid_argument( "DIRK requires time adaptation" )
           ),
           solver_( solver ? std::move( solver ) : throw std::invalid_argument( "DIRK requires a nonlinear solver" ) ),
-          params_( p ), table_( std::move( table ) ), work_( *operations_ ), error_( *operations_ )
+          params_( p ), table_( std::move( table ) ), work_( *operations_ ), error_( *operations_ ),
+          dense_( *operations_ )
     {
         if ( p.maximum_attempts == 0 )
             throw std::invalid_argument( "Empty DIRK attempt budget" );
         if ( table_.type() == butcher_table::scheme_type::explicit_rk )
             throw std::invalid_argument( "Use the explicit stepper for an entirely explicit table" );
+        if constexpr ( DenseOutput )
+            if ( !table_.has_dense_output() )
+                throw std::invalid_argument( "DIRK dense output requires a continuous extension in the table" );
         for ( std::size_t i = 0; i < table_.size(); ++i )
         {
             for ( std::size_t j = i + 1; j < table_.size(); ++j )
@@ -148,6 +172,12 @@ public:
         for ( std::size_t i = 0; i < table_.size(); ++i )
             if ( table_.a( i, i ) == 0 && needs_rate( i ) && !detail::has_rate_evaluation<Problem, vector_type>::value )
                 throw std::invalid_argument( "Zero-diagonal stages require bool evaluate_rate(state, rate)" );
+        if constexpr ( DenseOutput )
+            for ( std::size_t i = table_.size(); i < table_.dense_outout_stage_count(); ++i )
+                if ( needs_rate( i ) && !detail::has_rate_evaluation<Problem, vector_type>::value )
+                    throw std::invalid_argument(
+                        "Additional dense-output stages require bool evaluate_rate(state, rate)"
+                    );
         work_.init();
         work_.start_use();
         if ( estimate_error_ )
@@ -157,13 +187,19 @@ public:
         }
         const bool omit_endpoint_rate =
             stiffly_accurate_ && ( !estimate_error_ || table_.error_b( table_.size() - 1 ) == 0 );
-        const auto rate_count = table_.size() - ( omit_endpoint_rate ? 1 : 0 );
+        const auto rate_count =
+            DenseOutput ? table_.dense_outout_stage_count() : table_.size() - ( omit_endpoint_rate ? 1 : 0 );
         rates_.reserve( rate_count );
         for ( std::size_t i = 0; i < rate_count; ++i )
         {
             rates_.emplace_back( *operations_ );
             rates_.back().init();
             rates_.back().start_use();
+        }
+        if constexpr ( DenseOutput )
+        {
+            dense_.previous.init();
+            dense_.previous.start_use();
         }
         solver_->set_nonlinear_operator( problem_ );
     }
@@ -207,11 +243,27 @@ public:
         return table_;
     }
 
+    // Report the validated continuous-extension order, or zero when disabled.
+    unsigned int dense_output_order() const
+    {
+        return DenseOutput ? table_.dense_order() : 0;
+    }
+
+    // Borrow the accepted numerical step until apply(), reset(), or finalize().
+    template <bool Enabled = DenseOutput, std::enable_if_t<Enabled && DenseOutput, int> = 0>
+    continuous_integration<implicit_time_step> get_continuous_integration() const
+    {
+        if ( !pending_ )
+            throw std::logic_error( "No pending DIRK dense output" );
+        return { *this, generation_ };
+    }
+
     // Clear adaptation history, discard any pending candidate, and restore idle.
     // Keep the configured time, target, dependencies, and allocated workspace.
     void reset()
     {
         adaptation_->reset();
+        ++generation_;
         initialized_ = pending_ = false;
         dt_                     = 0;
         attempts_               = 0;
@@ -224,6 +276,7 @@ public:
     void apply( const vector_type &in, vector_type &out )
     {
         require_finalized();
+        ++generation_;
         attempts_ = 0;
         if ( adaptation_->requires_error_estimate() && !estimate_error_ )
         {
@@ -267,6 +320,14 @@ public:
             const auto  decision = assess( in, next_dt );
             if ( decision == adaptation_status::accepted )
             {
+                if constexpr ( DenseOutput )
+                    if ( !prepare_dense( in ) )
+                    {
+                        if ( adaptation_->reject_step( dt_ ) != adaptation_status::rejected )
+                            return;
+                        adaptation_->update( adaptation_status::rejected, time_, dt_, in );
+                        continue;
+                    }
                 operations_->assign( *work_, out );
                 status_  = single_step_status::converged;
                 pending_ = true;
@@ -290,7 +351,7 @@ public:
         if ( !pending_ )
             throw std::logic_error( "No DIRK candidate to finalize" );
         const auto elapsed  = committed_time - time_;
-        const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+        const auto endpoint = endpoint_time();
         if ( !std::isfinite( committed_time ) || ( dt_ > 0 ? committed_time < time_ || committed_time > endpoint
                                                            : committed_time > time_ || committed_time < endpoint ) )
             throw std::invalid_argument( "Committed time is outside the pending DIRK step" );
@@ -300,30 +361,130 @@ public:
 
 private:
     using vector_wrap_type = nmfd::detail::vector_wrap<VectorOperations, false, false>;
-    std::shared_ptr<VectorOperations>   operations_;
-    std::shared_ptr<Problem>            problem_;
-    std::shared_ptr<TimeStepAdaptation> adaptation_;
-    std::shared_ptr<NonlinearSolver>    solver_;
-    params                              params_;
-    butcher_table                       table_;
-    vector_wrap_type                    work_, error_;
-    std::vector<vector_wrap_type>       rates_;
-    scalar_type                         time_ = 0, target_ = 1, dt_ = 0;
-    unsigned int                        attempts_         = 0;
-    bool                                stiffly_accurate_ = false, estimate_error_ = false;
-    bool                                initialized_ = false, pending_ = false;
-    single_step_status                  status_ = single_step_status::idle;
+    std::shared_ptr<VectorOperations>                             operations_;
+    std::shared_ptr<Problem>                                      problem_;
+    std::shared_ptr<TimeStepAdaptation>                           adaptation_;
+    std::shared_ptr<NonlinearSolver>                              solver_;
+    params                                                        params_;
+    butcher_table                                                 table_;
+    vector_wrap_type                                              work_, error_;
+    std::vector<vector_wrap_type>                                 rates_;
+    detail::implicit_dense_storage<VectorOperations, DenseOutput> dense_;
+    std::size_t                                                   generation_ = 0;
+    scalar_type                                                   time_ = 0, target_ = 1, dt_ = 0;
+    unsigned int                                                  attempts_         = 0;
+    bool                                                          stiffly_accurate_ = false, estimate_error_ = false;
+    bool                                                          initialized_ = false, pending_ = false;
+    single_step_status                                            status_ = single_step_status::idle;
 
-    // A dummy explicit stage needs no derivative unless later stages, the
-    // primary endpoint or the configured embedding actually consume it.
+    friend class continuous_integration<implicit_time_step>;
+
+    scalar_type endpoint_time() const
+    {
+        return dt_ == target_ - time_ ? target_ : time_ + dt_;
+    }
+
+    // Retain only derivatives consumed by stages, endpoints, estimators or dense output.
     bool needs_rate( std::size_t i ) const
     {
-        if ( ( !stiffly_accurate_ && table_.b( i ) != 0 ) || ( estimate_error_ && table_.error_b( i ) != 0 ) )
+        if ( i < table_.size() &&
+             ( ( !stiffly_accurate_ && table_.b( i ) != 0 ) || ( estimate_error_ && table_.error_b( i ) != 0 ) ) )
             return true;
         for ( std::size_t j = i + 1; j < table_.size(); ++j )
             if ( table_.a( j, i ) != 0 )
                 return true;
+        if constexpr ( DenseOutput )
+        {
+            for ( std::size_t j = 0; j < table_.dense_degree(); ++j )
+                if ( table_.dense_coefficient( i, j ) != 0 )
+                    return true;
+            for ( std::size_t j = std::max( table_.size(), i + 1 ); j < table_.dense_outout_stage_count(); ++j )
+                if ( table_.dense_outout_a( j, i ) != 0 )
+                    return true;
+        }
         return false;
+    }
+
+    // Sample only stored rates; never invoke the problem or alter its stage data.
+    scalar_type evaluate_dense( scalar_type theta, vector_type &out, std::size_t generation ) const
+    {
+        static_assert( DenseOutput, "Dense output is disabled" );
+        if ( !pending_ || generation != generation_ )
+            throw std::logic_error( "Expired DIRK dense output" );
+        if ( !std::isfinite( theta ) || theta < 0 || theta > 1 )
+            throw std::invalid_argument( "Dense-output theta must be in [0,1]" );
+        if ( theta == 0 )
+            operations_->assign( *dense_.previous, out );
+        else if ( theta == 1 )
+            operations_->assign( *work_, out );
+        else
+        {
+            operations_->assign( *dense_.previous, out );
+            for ( std::size_t i = 0; i < rates_.size(); ++i )
+            {
+                const auto weight = static_cast<scalar_type>( table_.dense_b( i, theta ) );
+                if ( weight != 0 )
+                    operations_->add_lin_comb( dt_ * weight, *rates_[i], out );
+            }
+        }
+        return theta == 1 ? endpoint_time() : time_ + theta * dt_;
+    }
+
+    // Prepare extra explicit rates only after error acceptance, using the snapshot
+    // as scratch. Restore stage time and preserve the endpoint and frozen Jacobian.
+    bool prepare_dense( const vector_type &in )
+    {
+        static_assert( DenseOutput, "Dense output is disabled" );
+        const auto restore_time = time_ + dt_ * scalar_type( stiffly_accurate_ ? 1 : table_.c( table_.size() - 1 ) );
+        bool       ok = true, time_changed = false;
+        try
+        {
+            for ( std::size_t i = table_.size(); i < rates_.size(); ++i )
+            {
+                if ( !needs_rate( i ) )
+                    continue;
+                auto &state = *dense_.previous;
+                operations_->assign( in, state );
+                for ( std::size_t j = 0; j < i; ++j )
+                    if ( table_.dense_outout_a( i, j ) != 0 )
+                        operations_->add_lin_comb(
+                            dt_ * scalar_type( table_.dense_outout_a( i, j ) ), *rates_[j], state
+                        );
+                const auto stage_time = time_ + dt_ * scalar_type( table_.dense_outout_c( i ) );
+                if ( !std::isfinite( stage_time ) || !operations_->is_valid_number( state ) )
+                {
+                    status_ = single_step_status::failed_nonfinite;
+                    ok      = false;
+                    break;
+                }
+                time_changed = true;
+                problem_->set_time( stage_time );
+                if constexpr ( detail::has_rate_evaluation<Problem, vector_type>::value )
+                    if ( !problem_->evaluate_rate( state, *rates_[i] ) )
+                    {
+                        status_ = single_step_status::failed_solver;
+                        ok      = false;
+                        break;
+                    }
+                if ( !operations_->is_valid_number( *rates_[i] ) )
+                {
+                    status_ = single_step_status::failed_nonfinite;
+                    ok      = false;
+                    break;
+                }
+            }
+        }
+        catch ( ... )
+        {
+            if ( time_changed )
+                problem_->set_time( restore_time );
+            throw;
+        }
+        if ( time_changed )
+            problem_->set_time( restore_time );
+        if ( ok )
+            operations_->assign( in, *dense_.previous );
+        return ok;
     }
 
     // Reject operations that would overwrite an unfinalized candidate.
@@ -427,7 +588,7 @@ private:
         if ( estimate_error_ )
         {
             operations_->assign_scalar( scalar_type( 0 ), *error_ );
-            for ( std::size_t i = 0; i < rates_.size(); ++i )
+            for ( std::size_t i = 0; i < table_.size(); ++i )
                 if ( table_.error_b( i ) != 0 )
                     operations_->add_lin_comb( dt_ * scalar_type( table_.error_b( i ) ), *rates_[i], *error_ );
             if ( !operations_->is_valid_number( *error_ ) )

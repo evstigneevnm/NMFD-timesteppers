@@ -11,6 +11,31 @@ namespace time_steppers
 {
 namespace runge_kutta
 {
+namespace detail
+{
+// Integrate a linear rate with the RK endpoint and the stiffly accurate final rate.
+inline butcher_table::matrix_type quadratic_dense_coefficients( const butcher_table::vector_type &b )
+{
+    butcher_table::matrix_type coefficients;
+    for ( const auto weight : b )
+        coefficients.push_back( { 2 * weight, -weight } );
+    coefficients.back()[0] -= 1;
+    coefficients.back()[1] += 1;
+    return coefficients;
+}
+
+// Cubic endpoint Hermite: reuse the final stage and append a rate at the initial state.
+inline butcher_table::matrix_type hermite_dense_coefficients( const butcher_table::vector_type &b )
+{
+    butcher_table::matrix_type coefficients;
+    for ( const auto weight : b )
+        coefficients.push_back( { 0, 3 * weight, -2 * weight } );
+    coefficients.back()[1] -= 1;
+    coefficients.back()[2] += 1;
+    coefficients.push_back( { 1, -2, 1 } );
+    return coefficients;
+}
+}
 
 // DIRK names use p(q)s: primary order p, embedded order q, total stages s.
 inline butcher_table make_butcher_table( const std::string &name )
@@ -122,20 +147,41 @@ inline butcher_table make_butcher_table( const std::string &name )
     }
     if ( name == "IE" )
     {
-        return { { { 1 } }, { 1 }, 1 };
+        return { { { 1 } }, { 1 }, 1, {}, {}, 0, 2e-15L, { { 1 } }, 1 };
     }
     if ( name == "IM" )
     {
-        return { { { .5L } }, { 1 }, 2 };
+        // The extra initial rate makes the quadratic extension second-order.
+        return { { { .5L } }, { 1 }, 2, {}, {}, 0, 2e-15L, { { 0, 1 }, { 1, -1 } }, 2, { { 0, 0 } }, { 0 } };
     }
     if ( name == "CN" )
     {
-        return { { { 0, 0 }, { .5L, .5L } }, { .5L, .5L }, 2 };
+        return {
+            { { 0, 0 }, { .5L, .5L } },
+            { .5L, .5L },
+            2,
+            {},
+            {},
+            0,
+            2e-15L,
+            detail::quadratic_dense_coefficients( { .5L, .5L } ),
+            2
+        };
     }
     const auto gamma2 = 1.L - std::sqrt( 2.L ) / 2;
     if ( name == "SDIRK2(1)2" )
     {
-        return { { { gamma2, 0 }, { 1 - gamma2, gamma2 } }, { 1 - gamma2, gamma2 }, 2, {}, { .5L, .5L }, 1 };
+        return {
+            { { gamma2, 0 }, { 1 - gamma2, gamma2 } },
+            { 1 - gamma2, gamma2 },
+            2,
+            {},
+            { .5L, .5L },
+            1,
+            2e-15L,
+            detail::quadratic_dense_coefficients( { 1 - gamma2, gamma2 } ),
+            2
+        };
     }
     if ( name == "ESDIRK2(1)3" )
     {
@@ -149,7 +195,10 @@ inline butcher_table make_butcher_table( const std::string &name )
             2,
             {},
             { 1 - b2 - b3, b2, b3 },
-            1
+            1,
+            2e-15L,
+            detail::quadratic_dense_coefficients( { 1 - middle - g, middle, g } ),
+            2
         };
     }
     if ( name == "SDIRK3(1)3" )
@@ -160,12 +209,19 @@ inline butcher_table make_butcher_table( const std::string &name )
         const auto b2    = -3 * alpha * alpha / ( 4 * beta );
         const auto c2    = ( 2 - 9 * g + 6 * g * g ) / ( 3 * alpha );
         // Alexander's third-order primary method with the inherited first-order estimator.
-        return { { { g, 0, 0 }, { c2 - g, g, 0 }, { 1 - b2 - g, b2, g } },
-                 { 1 - b2 - g, b2, g },
-                 3,
-                 {},
-                 { .5L - b2, b2, .5L },
-                 1 };
+        return {
+            { { g, 0, 0 }, { c2 - g, g, 0 }, { 1 - b2 - g, b2, g } },
+            { 1 - b2 - g, b2, g },
+            3,
+            {},
+            { .5L - b2, b2, .5L },
+            1,
+            2e-15L,
+            detail::hermite_dense_coefficients( { 1 - b2 - g, b2, g } ),
+            3,
+            { { 0, 0, 0, 0 } },
+            { 0 }
+        };
     }
     if ( name == "ARK324L2SA" )
     {
@@ -177,6 +233,11 @@ inline butcher_table make_butcher_table( const std::string &name )
             .1876410243467238251612921441668043913795L, -.5952974735769549480478230275858851737782L,
             .9717899277217721234705114322255239398694L, g
         };
+        auto dense = detail::hermite_dense_coefficients( b );
+        // The explicit first stage already supplies the initial Hermite derivative.
+        for ( std::size_t j = 0; j < dense.back().size(); ++j )
+            dense.front()[j] += dense.back()[j];
+        dense.pop_back();
         return {
             { { 0, 0, 0, 0 },
               { g, g, 0, 0 },
@@ -187,7 +248,10 @@ inline butcher_table make_butcher_table( const std::string &name )
             { 0, 2 * g, .6L, 1 },
             { .2147402862233891404862383406484193714659L, -.4851622638849390928209050808398155895845L,
               .86872500252038755116621237682951240796L, .4016969751411624011684543633618838101586L },
-            2
+            2,
+            2e-15L,
+            std::move( dense ),
+            3
         };
     }
     throw std::invalid_argument( "Unknown RK scheme: " + name );

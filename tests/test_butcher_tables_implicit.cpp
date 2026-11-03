@@ -26,6 +26,8 @@ try
         );
         require( table.type() != butcher_table::scheme_type::explicit_rk, name );
         table_tests::check_order( table, name );
+        require( table.dense_order() == method.order, "Missing implicit continuous extension" );
+        table_tests::check_order( table, name, false, true );
         if ( table.is_embedded() )
         {
             table_tests::check_order( table, name, true );
@@ -34,6 +36,10 @@ try
     require( make_butcher_table( "CN" ).type() == butcher_table::scheme_type::dirk, "CN classification" );
     require( make_butcher_table( "SDIRK3(1)3" ).error_order() == 2, "SDIRK3(1)3 error scales as h^2" );
     require( make_butcher_table( "ARK324L2SA" ).error_order() == 3, "ARK324L2SA error scales as h^3" );
+    require(
+        make_butcher_table( "ARK324L2SA" ).dense_outout_stage_count() == 4,
+        "ARK324L2SA must reuse its initial rate for dense output"
+    );
 
     const struct
     {
