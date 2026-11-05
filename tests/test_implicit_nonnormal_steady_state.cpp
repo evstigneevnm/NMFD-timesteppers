@@ -19,9 +19,10 @@ struct nonnormal_decay
             out( 1 ) = -2 * in( 1 );
         }
     };
-    void apply( const vector_type &in, vector_type &out ) const
+    bool evaluate_rate( const vector_type &in, vector_type &out ) const
     {
         execute_small_mapping( mapping{ in, out } );
+        return true;
     }
     __DEVICE_TAG__ void residual(
         double, const stage_scaling &scaling, const vector_type &state, const vector_type &previous,

@@ -37,13 +37,13 @@ void test_balanced_scaling()
     operations->assign_scalar( .7, *state );
     for ( const double reference_time : { .25, 1., 4. } )
     {
-        stage_problem<forced_decay> problem( operations, {}, reference_time );
+        stage_problem<forced_decay> problem( operations );
         problem.set_time( .4 );
         operations->assign_scalar( .2, problem.previous_state() );
         operations->assign_scalar( .1, problem.known_rhs() );
         for ( const double alpha : { -1e12, -7., -1., -1e-12, 0., 1e-12, 1., 7., 1e12 } )
         {
-            problem.set_affine_shift( alpha );
+            set_test_shift( problem, alpha, reference_time );
             const auto scaling = problem.scaling();
             const auto scale   = std::max( std::abs( static_cast<long double>( alpha ) ), 1.L / reference_time );
             require(
@@ -71,16 +71,32 @@ void test_balanced_scaling()
             bool rejected = false;
             try
             {
-                problem.set_affine_shift( invalid );
+                problem.set_affine_shift( invalid, before.rhs );
             }
             catch ( const std::invalid_argument & )
             {
                 rejected = true;
             }
             require(
-                rejected && problem.alpha == 1e12 && problem.scaling().mass == before.mass &&
-                    problem.scaling().rhs == before.rhs,
+                rejected && problem.scaling().mass == before.mass && problem.scaling().rhs == before.rhs,
                 "Invalid shift changed prepared stage scaling"
+            );
+        }
+        for ( const double invalid_b :
+              { 0., -1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN() } )
+        {
+            bool rejected = false;
+            try
+            {
+                problem.set_affine_shift( before.mass, invalid_b );
+            }
+            catch ( const std::invalid_argument & )
+            {
+                rejected = true;
+            }
+            require(
+                rejected && problem.scaling().mass == before.mass && problem.scaling().rhs == before.rhs,
+                "Invalid RHS coefficient changed prepared stage scaling"
             );
         }
     }
@@ -91,7 +107,13 @@ void test_balanced_scaling()
         bool rejected = false;
         try
         {
-            stage_problem<forced_decay> problem( operations, {}, invalid );
+            using types              = newton_types<stage_problem<forced_decay>>;
+            auto             problem = std::make_shared<stage_problem<forced_decay>>( operations );
+            auto             control = std::make_shared<adaptation_type>( adaptation_type::params{ .1 } );
+            types::step_type step(
+                operations, problem, control, types::make_solver( operations ),
+                types::step_type::params{ "IE", 32, invalid }
+            );
         }
         catch ( const std::invalid_argument & )
         {
@@ -99,6 +121,35 @@ void test_balanced_scaling()
         }
         require( rejected, "Stage scaling accepted an invalid reference time" );
     }
+
+    // Reference-time selection belongs to the stepper. Check both scaling limits
+    // and integration directions against the same backward-Euler equation.
+    for ( const double reference_time : { .25, 1., 4. } )
+        for ( const double h : { -2., -.1, 1e-6, .1, 2. } )
+        {
+            using types              = newton_types<stage_problem<forced_decay>>;
+            auto             problem = std::make_shared<stage_problem<forced_decay>>( operations );
+            auto             control = std::make_shared<adaptation_type>( adaptation_type::params{ std::abs( h ) } );
+            types::step_type step(
+                operations, problem, control, types::make_solver( operations ),
+                types::step_type::params{ "IE", 32, reference_time }
+            );
+            operations->assign_scalar( .7, *state );
+            step.set_time( .3 );
+            step.set_target_time( .3 + h );
+            step.apply( *state, *residual );
+            const double dt       = step.get_dt();
+            const auto   expected = balanced_stage_scaling( 1 / dt, reference_time );
+            require(
+                step.get_status() == single_step_status::converged &&
+                    std::abs(
+                        operations->get_value_at_point( 0, *residual ) - ( .7 + dt * ( .3 + dt ) ) / ( 1 + dt )
+                    ) < 1e-10 &&
+                    problem->scaling().mass == expected.mass && problem->scaling().rhs == expected.rhs,
+                "Stepper ignored reference_time or changed the stage equation"
+            );
+            step.finalize( adaptation_status::accepted, .3 + dt, *residual );
+        }
 
     // Frozen-time pseudo-transient stages approach f+r=0 as h grows. Check that
     // physical balance, not the h-dependent scaled norm, measures progress.
@@ -113,7 +164,7 @@ void test_balanced_scaling()
     for ( const double alpha : { 1., 1e-3, 1e-6, 0. } )
     {
         operations->assign( *state, problem->previous_state() );
-        problem->set_affine_shift( alpha );
+        set_test_shift( *problem, alpha );
         require( solver->solve( *state ), "Large-step or steady-limit Newton stage failed" );
         const auto error = std::abs( operations->get_value_at_point( 0, *state ) - .5 );
         require( error < physical_error, "Pseudo-transient stage did not reduce the physical residual" );

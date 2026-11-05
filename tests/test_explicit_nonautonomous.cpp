@@ -52,7 +52,7 @@ struct rate_problem
             out( 0 ) = equation.rhs( time, in( 0 ) ) / equation.mass( time );
         }
     };
-    void apply( const vector_type &in, vector_type &out ) const
+    bool evaluate_rate( const vector_type &in, vector_type &out ) const
     {
         const mapping map{ equation, time, in, out };
         if constexpr ( operations_type::memory_type::is_host_visible )
@@ -63,6 +63,7 @@ struct rate_problem
             execute( map, 1 );
             execute.wait();
         }
+        return true;
     }
 };
 

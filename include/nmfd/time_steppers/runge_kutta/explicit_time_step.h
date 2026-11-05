@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
+#include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
 #include <nmfd/time_steppers/runge_kutta/butcher_tables.h>
 #include <nmfd/time_steppers/runge_kutta/continuous_integration.h>
@@ -19,30 +20,7 @@ namespace runge_kutta
 {
 namespace detail
 {
-template <class Problem, class T, class = void>
-struct has_set_time : std::false_type
-{
-};
-
-template <class Problem, class T>
-struct has_set_time<Problem, T, std::void_t<decltype( std::declval<Problem &>().set_time( std::declval<T>() ) )>>
-    : std::true_type
-{
-};
-
-template <class Problem, class Vector, class = void>
-struct has_apply : std::false_type
-{
-};
-
-template <class Problem, class Vector>
-struct has_apply<
-    Problem, Vector,
-    std::void_t<
-        decltype( std::declval<Problem &>().apply( std::declval<const Vector &>(), std::declval<Vector &>() ) )>>
-    : std::true_type
-{
-};
+using nmfd::time_steppers::detail::has_set_time;
 
 template <class Adaptation, class = void>
 struct has_error_requirement : std::false_type
@@ -86,8 +64,8 @@ public:
         bool         reuse_endpoint_rate = false;
     };
     static_assert(
-        detail::has_apply<Problem, vector_type>::value,
-        "Explicit RK requires problem.apply(state, rate); optional set_time(stage_time)"
+        nmfd::time_steppers::detail::has_rate_evaluation<Problem, vector_type>::value,
+        "Explicit RK requires bool evaluate_rate(state, rate); optional set_time(stage_time)"
     );
 
     explicit_time_step(
@@ -292,7 +270,6 @@ public:
                 // No assessment/callback may inspect an invalid numerical candidate.
                 if ( adaptation_->reject_step( dt_ ) != adaptation_status::rejected )
                 {
-                    status_ = single_step_status::failed_nonfinite;
                     return;
                 }
                 adaptation_->update( adaptation_status::rejected, time_, dt_, in );
@@ -308,7 +285,6 @@ public:
                     {
                         if ( adaptation_->reject_step( dt_ ) != adaptation_status::rejected )
                         {
-                            status_ = single_step_status::failed_nonfinite;
                             return;
                         }
                         adaptation_->update( adaptation_status::rejected, time_, dt_, in );
@@ -327,6 +303,7 @@ public:
                 return;
             }
         }
+        status_ = single_step_status::attempt_limit_reached;
     }
 
     void finalize( adaptation_status outcome, scalar_type committed_time, const vector_type &state )
@@ -462,6 +439,7 @@ private:
     bool prepare_dense( const vector_type &in )
     {
         static_assert( DenseOutput, "Dense output is disabled" );
+        status_ = single_step_status::failed_nonfinite;
         // Reuse the snapshot buffer as scratch without disturbing the candidate.
         auto &scratch = *dense_.previous;
         for ( std::size_t i = table_.size(); i < table_.dense_outout_stage_count(); ++i )
@@ -483,8 +461,7 @@ private:
             {
                 problem_->set_time( time_ + dt_ * static_cast<scalar_type>( table_.dense_outout_c( i ) ) );
             }
-            problem_->apply( scratch, stage( i ) );
-            if ( !operations_->is_valid_number( stage( i ) ) )
+            if ( !evaluate_rate( scratch, stage( i ) ) )
             {
                 return false;
             }
@@ -495,8 +472,7 @@ private:
         }
         if ( !table_.has_dense_output() )
         {
-            problem_->apply( *work_, *dense_.endpoint_rate );
-            if ( !operations_->is_valid_number( *dense_.endpoint_rate ) )
+            if ( !evaluate_rate( *work_, *dense_.endpoint_rate ) )
             {
                 return false;
             }
@@ -508,6 +484,7 @@ private:
 
     bool compute( const vector_type &in, bool &first_rate_valid )
     {
+        status_    = single_step_status::failed_nonfinite;
         auto &work = *work_;
         for ( std::size_t i = 0; i < table_.size(); ++i )
         {
@@ -527,8 +504,7 @@ private:
                     operations_->add_mul( dt_ * static_cast<scalar_type>( table_.a( i, j ) ), stage( j ), work );
                 }
             }
-            problem_->apply( work, stage( i ) );
-            if ( !operations_->is_valid_number( stage( i ) ) )
+            if ( !evaluate_rate( work, stage( i ) ) )
             {
                 return false;
             }
@@ -567,6 +543,21 @@ private:
         }
         return operations_->is_valid_number( work ) && ( !primary_error || operations_->is_valid_number( *error_ ) ) &&
                ( !combined_error_ || operations_->is_valid_number( *secondary_error_ ) );
+    }
+
+    bool evaluate_rate( const vector_type &state, vector_type &rate )
+    {
+        if ( !problem_->evaluate_rate( state, rate ) )
+        {
+            status_ = single_step_status::failed_solver;
+            return false;
+        }
+        if ( !operations_->is_valid_number( rate ) )
+        {
+            status_ = single_step_status::failed_nonfinite;
+            return false;
+        }
+        return true;
     }
 };
 }

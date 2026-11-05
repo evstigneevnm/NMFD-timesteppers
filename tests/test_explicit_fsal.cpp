@@ -73,20 +73,23 @@ struct growth
     bool                                 forced = false, quadratic = false;
     double                               time = 0, rate = 1;
     std::size_t                          calls = 0, initial_calls = 0, fail_call = 0;
+    bool                                 fail_solve = false;
 
     void set_time( double t )
     {
         time = t;
     }
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         ++calls;
         initial_calls += time == 0;
         if ( calls == fail_call )
         {
+            if ( fail_solve )
+                return false;
             operations->assign_scalar( std::numeric_limits<double>::quiet_NaN(), out );
-            return;
+            return true;
         }
         if ( quadratic )
         {
@@ -100,6 +103,7 @@ struct growth
         {
             operations->add_mul_scalar( time, 1., out );
         }
+        return true;
     }
 };
 
@@ -394,7 +398,9 @@ void check_retries(
     }
 }
 
-void check_failures( std::shared_ptr<counting_operations> operations_owner, vector_type &in, vector_type &out )
+void check_failures(
+    std::shared_ptr<counting_operations> operations_owner, vector_type &in, vector_type &out, bool fail_solve = false
+)
 {
     auto &operations = *operations_owner;
     operations.assign_scalar( 1., in );
@@ -405,6 +411,7 @@ void check_failures( std::shared_ptr<counting_operations> operations_owner, vect
             auto  problem_owner = std::make_shared<growth>( growth{ operations_owner, true } );
             auto &problem       = *problem_owner;
             problem.fail_call   = fail_call;
+            problem.fail_solve  = fail_solve;
             adaptive_type::params p;
             p.initial_step         = .5;
             p.relative_tolerance   = .01;
@@ -430,6 +437,7 @@ void check_failures( std::shared_ptr<counting_operations> operations_owner, vect
         auto  problem_owner = std::make_shared<growth>( growth{ operations_owner, true } );
         auto &problem       = *problem_owner;
         problem.fail_call   = 2;
+        problem.fail_solve  = fail_solve;
         auto  fixed_owner   = std::make_shared<fixed_type>( typename fixed_type::params{ .1 } );
         auto &fixed         = *fixed_owner;
         auto  failed_owner  = std::make_shared<step_type<fixed_type>>(
@@ -439,7 +447,8 @@ void check_failures( std::shared_ptr<counting_operations> operations_owner, vect
         operations.assign_scalar( 77., out );
         failed.apply( in, out );
         require(
-            failed.get_status() == step_status::failed_nonfinite && read( operations, out ) == 77,
+            failed.get_status() == ( fail_solve ? step_status::failed_solver : step_status::failed_nonfinite ) &&
+                read( operations, out ) == 77,
             "Failed FSAL attempt preserves caller output"
         );
         const auto calls = problem.calls;
@@ -452,6 +461,7 @@ void check_failures( std::shared_ptr<counting_operations> operations_owner, vect
     auto  problem_owner = std::make_shared<growth>( growth{ operations_owner, true } );
     auto &problem       = *problem_owner;
     problem.fail_call   = 14;
+    problem.fail_solve  = fail_solve;
     adaptive_type::params p;
     p.initial_step          = .5;
     p.relative_tolerance    = .01;
@@ -565,6 +575,7 @@ try
         check_retries<true>( operations_owner, *x, *reference, *sample, *reference_sample, method );
     }
     check_failures( operations_owner, *x, *sample );
+    check_failures( operations_owner, *x, *sample, true );
     check_external_manager( operations_owner, *x, *sample );
     require( operations.live == 4, "FSAL releases all internal vectors" );
     std::cout << "FSAL stage reuse, allocation, invalidation, retry, dense output and external section tests: PASS\n";

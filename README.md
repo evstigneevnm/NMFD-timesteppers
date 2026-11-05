@@ -44,9 +44,11 @@ for explicit-only users.
   committed error/step history, additive RMS assessment, and bounded startup/retries.
 - `integration/time_integrator.h`: interval traversal, external management, commit.
 
-An explicit problem supplies `apply(in, rate)` and optionally `set_time(t)`.
+An explicit problem supplies `bool evaluate_rate(state, rate)` and optionally `set_time(t)`.
 The rate is already mass-inverted/projected when the formulation requires it.
 There is no implicit-residual reinterpretation and no general singular-mass solve.
+Return `false` on a failed rate solve; the stepper rejects/retries without publishing
+a candidate. Nonfinite results are rejected separately; exceptions propagate.
 
 The single-step method returns a pending candidate. The integrator calls
 `finalize()` after external processing; failed candidates never replace the
@@ -92,7 +94,7 @@ Coefficient sources: [SSP embedded pairs](https://imrefekete.web.elte.hu/files/2
 [Dormand-Prince method](https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.RK45.html).
 Rooted-tree tests check nonlinear order, not just a scalar stability polynomial.
 
-IMEX stepping is not implemented yet.
+These IMEX tables are executed by `runge_kutta/imex_time_step.h`.
 Adaptive initialization uses the configured initial step and bounded rejection,
 not an extra initial derivative evaluation.
 
@@ -102,13 +104,13 @@ not an extra initial derivative evaluation.
 including IE, IM, CN, SDIRK2(1)2, ESDIRK2(1)3, SDIRK3(1)3, ARK324L2SA and
 user-supplied DIRK tables. The constructor accepts a method name through `params`,
 or a `butcher_table` directly. Coupled IRK is rejected; entirely explicit tables
-belong to the explicit engine. Existing nonzero-diagonal problems need no changes.
+belong to the explicit engine.
 
 The problem owns `previous_state()` and `known_rhs()` buffers and supplies:
 
 ```cpp
 void set_time(scalar_type time);
-void set_affine_shift(scalar_type alpha);
+void set_affine_shift(scalar_type a, scalar_type b);
 void apply(const vector_type& state, vector_type& residual);
 void set_linearization_point(const vector_type& state);
 std::shared_ptr<const jacobi_operator_type> get_jacobi_operator();
@@ -116,24 +118,22 @@ std::shared_ptr<const jacobi_operator_type> get_jacobi_operator();
 
 The buffers have mutable and const reference accessors and must not alias one
 another, caller states, or solver scratch. The residual is
-`alpha*M(t,u)*(u-previous)-f(t,u)-known_rhs`. Its Jacobian includes derivatives of
+`a*M(t,u)*(u-previous)-b*(f(t,u)+known_rhs)`. Its Jacobian includes derivatives of
 a state-dependent mass. Trial residual calls must not alter frozen Jacobian data.
 
-Problems may evaluate a fixed row-scaled equivalent of that canonical residual.
-The implicit test problems use balanced differential rows:
+The stepper balances differential rows using `params::reference_time` (default one):
 `s=max(abs(alpha),1/reference_time)`, `a=alpha/s`, `b=1/s`, and
-`G=a*M(t,u)*(u-previous)-b*(f(t,u)+known_rhs)`. They construct this form directly,
-not by multiplying an already formed large residual. Their Jacobians apply the
-same coefficients, including the mass derivative. `set_affine_shift()` freezes
-the coefficients for the entire Newton solve and its backtracking trials.
-The test reference time defaults to one for these nondimensional models.
+`G=a*M(t,u)*(u-previous)-b*(f(t,u)+known_rhs)`. The problem evaluates this form directly,
+not by multiplying an already formed large residual. Its Jacobian uses the same
+coefficients, including the mass derivative. `set_affine_shift(a,b)` stores them
+unchanged for the entire Newton solve and its backtracking trials.
 Algebraic constraints and their Jacobian rows remain unscaled. General singular
 mass formulations must supply their own appropriate equation partition/scaling;
 the timestepper does not infer it from a mass-matrix diagonal or invert the mass.
 
 This balances small and large stage steps, including negative shifts and the
-zero-shift steady limit, without changing the stage/Newton interfaces or solver
-tolerances. It is not a globalization controller or a timestep-aware nonlinear
+zero-shift steady limit without changing Newton or solver tolerances.
+It is not a globalization controller or a timestep-aware nonlinear
 accuracy budget. Future globalization must measure progress in the original
 physical residual and constraints, not compare scaled norms across stage shifts.
 
@@ -176,8 +176,8 @@ For singular mass, provide a formulation-specific complete consistent derivative
 including differentiated constraints and gauges where required. The tests supply
 the moving index-1 constraint's nonzero algebraic rate, but deliberately refuse
 ESDIRK for the existing index-2 Stokes problem without such a provider. This is
-not automatic support for arbitrary DAEs. The pure explicit engine has not yet
-been connected to this optional method; IMEX execution remains deferred.
+not automatic support for arbitrary DAEs. Explicit stepping uses the same rate
+contract, including for dense-output evaluations.
 
 `ARK324L2SA` is the implicit four-stage Kennedy-Carpenter ARK3(2)4L[2]SA pair:
 third-order primary and second-order embedding, with controller exponent three.
@@ -250,6 +250,78 @@ checkouts (override `NMFD_NEWTON_ROOT` and `NMFD_LINSOLVERS_ROOT`). Default expl
 test targets still require neither solver library. Parent CI runs separate jobs
 for DIRK order, mass/DAE, lifecycle, Lorenz, Rossler, and regular/stiff Van der Pol
 on CPU/OpenMP and capability-gated CUDA.
+
+## Interface Migration And IMEX Assembly
+
+Rename explicit RHS providers from `void apply(state,rate)` to
+`bool evaluate_rate(state,rate)`, returning success after the problem-owned mass
+solve. Replace one-argument implicit setters with `set_affine_shift(a,b)` and
+apply both coefficients consistently to differential residual/Jacobian rows.
+Integrator, controller, commit and nonlinear-solver interfaces are unchanged.
+
+`runge_kutta/imex_operator.h` provides a shared bundle for future IMEX execution:
+
+```cpp
+using imex_operator_type = runge_kutta::imex_operator<explicit_type, implicit_type>;
+std::shared_ptr<imex_operator_type> get_imex_operator(); // application-owned, cached
+```
+
+Its `explicit_part` supplies `evaluate_rate()` for `M*k_E=f_E`.
+Its `implicit_part` supplies the shifted residual/Jacobian and optionally
+`evaluate_rate()` for `M*k_I=f_I`. Rates exclude the other partition and stage
+forcing. Retain shared model data without a back-pointer to the bundle/application;
+bind solvers once at assembly.
+
+## Fixed-Step IMEX RK
+
+`runge_kutta/imex_time_step.h` executes the four existing IMEX tables through
+the ordinary stepper/integrator/controller interfaces:
+
+```cpp
+using step_type = runge_kutta::imex_time_step<Space, Problem, Controller, NonlinearSolver>;
+auto step = std::make_shared<step_type>(space, problem, controller, solver,
+                                       step_type::params{"IMEX_ARS222"});
+```
+
+The constructor calls `problem->get_imex_operator()` once, retains that shared
+bundle (not the factory), and binds Newton to `implicit_part` once. The two
+partitions must use the same state/mass convention and independent stage contexts.
+Explicit `set_time(t)` is optional for autonomous providers; implicit `set_time(t)`
+is required by the stage contract. No Newton headers are included by the engine.
+
+At stage i, both partitions receive `t_i=t_n+c_i*h`. The engine writes
+`previous=u_n+h*sum_{j<i}(aE_ij*kE_j+aI_ij*kI_j)` and `known_rhs=0`.
+A nonzero implicit diagonal solves
+`a*M(t_i,Y_i)*(Y_i-previous)-b*f_I(t_i,Y_i)=0`, with balanced
+`a/b=1/(h*aI_ii)`, then recovers `kI_i=(Y_i-previous)/(h*aI_ii)` when consumed.
+A consumed zero-diagonal implicit rate uses `implicit_part->evaluate_rate()`.
+Consumed explicit rates use `explicit_part->evaluate_rate(Y_i,kE_i)`.
+The endpoint combines both weight vectors; globally stiffly accurate pairs
+reuse the final stage. Unused rates are neither evaluated nor allocated.
+
+Mass solves and consistent partition derivatives remain problem-owned. Nonsingular
+time/state-dependent coupled mass is tested; this does not establish general
+singular-mass DAE support. No vector-sized data is transferred to the host by the engine.
+Workspace is reused, and rates are rebuilt after rejection, reset or modified endpoints.
+Failed rates/Newton stages follow bounded rejection without assessing or publishing
+an invalid candidate; backend/configuration exceptions propagate.
+
+This stage has no validated combined embedded estimator or continuous extension.
+An error-requiring controller reports `error_estimate_unavailable` before stage work.
+`DenseOutput=true` is rejected during construction; no dense view is exposed.
+Fixed-step and error-free merit controllers retain their existing acceptance contracts.
+
+`test_implicit_imex.cpp`, `test_implicit_imex_mass.cpp`, and
+`test_implicit_imex_lifecycle.cpp` cover limiting/mixed orders, nonlinear and timed
+splits, stiff tracking, mass Jacobians/solves, rollback, ownership and workspace reuse.
+`test_implicit_imex_backend.cpp` runs matrix-free Newton/GMRES on 8192 unknowns
+with vector-sized host transfers blocked. Parent CI covers GCC/Clang CPU/OpenMP,
+sanitizers and capability-gated CUDA/HIP.
+
+```sh
+make -j2 test_imex_cpu
+make -j2 test_imex_cuda CUDA_ARCH=75
+```
 
 ## Non-Autonomous Verification
 

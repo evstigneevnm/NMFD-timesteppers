@@ -192,10 +192,11 @@ struct forced_growth
         time = t;
     }
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         operations->assign( in, out );
         operations->add_mul_scalar( time, 1., out );
+        return true;
     }
 };
 
@@ -203,9 +204,10 @@ struct constant_rate
 {
     std::shared_ptr<operations_type> operations;
 
-    void apply( const vector_type &, vector_type &out )
+    bool evaluate_rate( const vector_type &, vector_type &out )
     {
         operations->assign_scalar( 1., out );
+        return true;
     }
 };
 
@@ -219,11 +221,100 @@ struct limited_rate
         time = t;
     }
 
-    void apply( const vector_type &, vector_type &out )
+    bool evaluate_rate( const vector_type &, vector_type &out )
     {
         operations->assign_scalar( time > .08 ? std::numeric_limits<double>::infinity() : 1., out );
+        return true;
     }
 };
+
+struct failing_rate : forced_growth
+{
+    unsigned int failures    = 0;
+    bool         throw_error = false;
+
+    bool evaluate_rate( const vector_type &in, vector_type &out )
+    {
+        if ( throw_error )
+            throw std::runtime_error( "Injected mass-solve exception" );
+        if ( failures )
+        {
+            --failures;
+            return false; // Deliberately leave the previous rate in out.
+        }
+        return forced_growth::evaluate_rate( in, out );
+    }
+    void apply( const vector_type &, vector_type & )
+    {
+        throw std::logic_error( "Explicit RK must not evaluate a residual" );
+    }
+};
+
+void test_rate_failure()
+{
+    using namespace nmfd::time_steppers;
+    using step_type     = runge_kutta::explicit_time_step<operations_type, failing_rate, constant_type>;
+    using adaptive_step = runge_kutta::explicit_time_step<operations_type, failing_rate, adaptive_type>;
+    auto operations     = std::make_shared<operations_type>( 1 );
+    auto problem        = std::make_shared<failing_rate>();
+    problem->operations = operations;
+    nmfd::detail::vector_wrap<operations_type> initial( *operations ), out( *operations );
+    initial.start_use();
+    out.start_use();
+    operations->assign_scalar( 1., *initial );
+    operations->assign_scalar( 77., *out );
+    step_type step( operations, problem, std::make_shared<constant_type>() );
+    for ( const bool in_place : { false, true } )
+    {
+        problem->failures = 1;
+        step.apply( *initial, in_place ? *initial : *out );
+        require(
+            step.get_status() == single_step_status::failed_solver &&
+                operations->get_value_at_point( 0, *initial ) == 1 && operations->get_value_at_point( 0, *out ) == 77,
+            "Failed rate used stale output or changed the caller state"
+        );
+    }
+    problem->throw_error = true;
+    bool threw           = false;
+    try
+    {
+        step.apply( *initial, *out );
+    }
+    catch ( const std::runtime_error & )
+    {
+        threw = true;
+    }
+    require( threw && operations->get_value_at_point( 0, *out ) == 77, "Rate exception was swallowed or committed" );
+    problem->throw_error = false;
+    adaptive_type::params p;
+    p.initial_step = p.maximum_step = .1;
+    p.minimum_step                  = .001;
+    p.relative_tolerance = p.absolute_tolerance = 1;
+    problem->failures                           = 1;
+    adaptive_step retry( operations, problem, std::make_shared<adaptive_type>( operations, p ) );
+    retry.apply( *initial, *out );
+    require(
+        retry.get_status() == single_step_status::converged && retry.get_attempts() == 2 && retry.get_dt() < .1,
+        "Failed rate did not shrink and retry"
+    );
+    const double h = retry.get_dt();
+    require(
+        std::abs( operations->get_value_at_point( 0, *out ) - ( 2 * std::exp( h ) - h - 1 ) ) < 1e-8,
+        "Retry did not start from the committed input"
+    );
+    retry.finalize( adaptation_status::accepted, h, *out );
+    operations->assign_scalar( 77., *out );
+    problem->failures = 10;
+    adaptive_step exhausted(
+        operations, problem, std::make_shared<adaptive_type>( operations, p ), adaptive_step::params{ "RK45", 2 }
+    );
+    exhausted.apply( *initial, *out );
+    require(
+        exhausted.get_status() == single_step_status::attempt_limit_reached && exhausted.get_attempts() == 2 &&
+            operations->get_value_at_point( 0, *out ) == 77,
+        "Failed rate escaped the attempt budget"
+    );
+}
 
 struct stop_at_section
 {
@@ -422,9 +513,9 @@ void test_rk23_error(
     step.finalize( nmfd::time_steppers::adaptation_status::accepted, step.get_dt(), result );
 }
 
-static_assert( nmfd::time_steppers::runge_kutta::detail::has_apply<constant_rate, vector_type>::value );
+static_assert( nmfd::time_steppers::detail::has_rate_evaluation<constant_rate, vector_type>::value );
 static_assert( !nmfd::time_steppers::runge_kutta::detail::has_set_time<constant_rate, double>::value );
-static_assert( !nmfd::time_steppers::runge_kutta::detail::has_apply<int, vector_type>::value );
+static_assert( !nmfd::time_steppers::detail::has_rate_evaluation<int, vector_type>::value );
 
 int main()
 try
@@ -432,6 +523,7 @@ try
     backend_type::init_device();
     test_error_scaling<float>();
     test_error_scaling<double>();
+    test_rate_failure();
     auto                                       operations_owner = std::make_shared<operations_type>( 1 );
     auto                                      &operations       = *operations_owner;
     nmfd::detail::vector_wrap<operations_type> initial_wrap( operations ), result_wrap( operations ),

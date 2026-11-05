@@ -23,7 +23,7 @@ void test_stalled_stage()
     operations->assign_scalar( 0., problem->known_rhs() );
     operations->set( previous.d, *state, 3 );
     problem->set_time( .40390075177026186 );
-    problem->set_affine_shift( 208890.52588143403 );
+    set_test_shift( *problem, 208890.52588143403 );
     solver->set_nonlinear_operator( problem );
     require( solver->solve( *state ), "Balanced Lorenz stage retained the raw-residual stagnation" );
     scfd::static_vec::vec<double, 3> actual;

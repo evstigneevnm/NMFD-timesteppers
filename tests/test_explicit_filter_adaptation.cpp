@@ -325,10 +325,11 @@ struct forced_growth
     {
         time = t;
     }
-    void apply( const operations_type::vector_type &in, operations_type::vector_type &out )
+    bool evaluate_rate( const operations_type::vector_type &in, operations_type::vector_type &out )
     {
         operations->assign( in, out );
         operations->add_mul_scalar( time, 1., out );
+        return true;
     }
 };
 

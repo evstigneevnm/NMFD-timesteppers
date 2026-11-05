@@ -30,7 +30,7 @@ struct explicit_rossler_problem
         }
     };
 
-    void apply( const vector_type &in, vector_type &out ) const
+    bool evaluate_rate( const vector_type &in, vector_type &out ) const
     {
         const mapping map{ in, out, a, b, c };
         if constexpr ( VectorOperations::memory_type::is_host_visible )
@@ -44,6 +44,7 @@ struct explicit_rossler_problem
             execute( map, 1 );
             execute.wait();
         }
+        return true;
     }
 };
 }

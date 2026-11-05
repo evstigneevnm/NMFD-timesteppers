@@ -1,6 +1,7 @@
 #include "implicit_rate_test.h"
 #include "nonautonomous_test_problems.h"
 #include <nmfd/time_steppers/integration/time_step_adaptation_matlab.h>
+#include <nmfd/time_steppers/runge_kutta/imex_operator.h>
 #include <limits>
 
 using namespace nmfd::time_steppers;
@@ -12,6 +13,83 @@ using namespace nmfd::time_steppers::tests;
 using equation_type = rate_scalar_equation<coefficient_growth<double>>;
 using problem_type  = rate_problem<equation_type>;
 using types         = newton_types<problem_type>;
+
+// Identity-mass partitions: f_E=sin(t)+cos(t)-u, f_I=t*u. This tests assembly only,
+// not an additive RK step or its order conditions.
+void test_imex_binding()
+{
+    using explicit_type = rate_problem<rate_scalar_equation<stiff_tracking<double>>>;
+    using bundle_type   = runge_kutta::imex_operator<explicit_type, problem_type>;
+    struct application
+    {
+        std::shared_ptr<bundle_type> partitions;
+        std::shared_ptr<bundle_type> get_imex_operator() const
+        {
+            return partitions;
+        }
+    };
+    auto                         operations = std::make_shared<operations_type>( 1 );
+    std::weak_ptr<explicit_type> explicit_lifetime;
+    std::weak_ptr<problem_type>  implicit_lifetime;
+    {
+        auto explicit_part = std::make_shared<explicit_type>( operations );
+        auto implicit_part = std::make_shared<problem_type>( operations );
+        explicit_lifetime  = explicit_part;
+        implicit_lifetime  = implicit_part;
+        application problem{ std::make_shared<bundle_type>( explicit_part, implicit_part ) };
+        auto        bundle = problem.get_imex_operator();
+        require( bundle == problem.get_imex_operator(), "IMEX getter rebuilt partition contexts" );
+        for ( const bool missing_explicit : { false, true } )
+        {
+            bool rejected = false;
+            try
+            {
+                bundle_type invalid(
+                    missing_explicit ? nullptr : explicit_part, missing_explicit ? implicit_part : nullptr
+                );
+            }
+            catch ( const std::invalid_argument & )
+            {
+                rejected = true;
+            }
+            require( rejected, "IMEX accepted a missing partition" );
+        }
+        explicit_part.reset();
+        implicit_part.reset();
+        require( !explicit_lifetime.expired() && !implicit_lifetime.expired(), "IMEX lost partition ownership" );
+        vector_wrap_type state( *operations ), out( *operations );
+        state.start_use();
+        out.start_use();
+        operations->assign_scalar( 1., *state );
+        bundle->explicit_part->set_time( .3 );
+        bundle->implicit_part->set_time( .3 );
+        bundle->implicit_part->set_affine_shift( 2., .5 );
+        operations->assign_scalar( .7, bundle->implicit_part->previous_state() );
+        operations->assign_scalar( .2, bundle->implicit_part->known_rhs() );
+        require(
+            bundle->explicit_part->evaluate_rate( *state, *out ) &&
+                std::abs( operations->get_value_at_point( 0, *out ) - ( std::sin( .3 ) + std::cos( .3 ) - 1 ) ) < 1e-14,
+            "IMEX explicit rate used the implicit partition"
+        );
+        require(
+            bundle->implicit_part->evaluate_rate( *state, *out ) &&
+                std::abs( operations->get_value_at_point( 0, *out ) - .3 ) < 1e-14,
+            "IMEX implicit rate included the explicit partition or stage shift"
+        );
+        bundle->implicit_part->apply( *state, *out );
+        require(
+            std::abs( operations->get_value_at_point( 0, *out ) - .35 ) < 1e-14,
+            "IMEX residual changed the supplied affine coefficients"
+        );
+        auto solver = types::make_solver( operations );
+        solver->set_nonlinear_operator( bundle->implicit_part );
+        require(
+            solver->solve( *state ) && std::abs( operations->get_value_at_point( 0, *state ) - 1.5 / 1.85 ) < 1e-10,
+            "IMEX implicit partition did not bind to the ordinary nonlinear solver"
+        );
+    }
+    require( explicit_lifetime.expired() && implicit_lifetime.expired(), "IMEX partition ownership cycle" );
+}
 
 void test_rate_and_stages()
 {
@@ -25,7 +103,7 @@ void test_rate_and_stages()
     operations->assign_scalar( .7, problem->previous_state() );
     operations->assign_scalar( .2, problem->known_rhs() );
     problem->set_time( .3 );
-    problem->set_affine_shift( 7 );
+    set_test_shift( *problem, 7 );
     problem->apply( *state, *before );
     require( problem->evaluate_rate( *state, *out ), "Rate evaluation failed" );
     require(
@@ -297,6 +375,7 @@ try
     test_failure_and_lifecycle();
     test_unavailable_estimate();
     test_optional_capability();
+    test_imex_binding();
     std::cout << "CN/ESDIRK rate evaluation, timed/interior stages, failures and commitment: PASS\n";
 }
 catch ( const std::exception &error )

@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
+#include <nmfd/time_steppers/detail/affine_shift.h>
+#include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
 #include <nmfd/time_steppers/runge_kutta/butcher_tables.h>
 #include <nmfd/time_steppers/runge_kutta/continuous_integration.h>
@@ -41,22 +43,7 @@ struct implicit_dense_storage<VectorOperations, true>
     }
 };
 
-template <class Problem, class Vector, class = void>
-struct has_rate_evaluation : std::false_type
-{
-};
-
-template <class Problem, class Vector>
-struct has_rate_evaluation<
-    Problem, Vector,
-    std::void_t<decltype( std::declval<Problem &>()
-                              .evaluate_rate( std::declval<const Vector &>(), std::declval<Vector &>() ) )>>
-    : std::is_same<
-          decltype( std::declval<Problem &>()
-                        .evaluate_rate( std::declval<const Vector &>(), std::declval<Vector &>() ) ),
-          bool>
-{
-};
+using nmfd::time_steppers::detail::has_rate_evaluation;
 
 template <class Adaptation, class Vector, class T, class = void>
 struct has_embedded_assessment : std::false_type
@@ -73,33 +60,7 @@ struct has_embedded_assessment<
 {
 };
 
-template <class Problem, class Vector, class T, class = void>
-struct has_implicit_stage_interface : std::false_type
-{
-};
-
-template <class Problem, class Vector, class T>
-struct has_implicit_stage_interface<
-    Problem, Vector, T,
-    std::void_t<
-        typename Problem::jacobi_operator_type, decltype( std::declval<Problem &>().set_time( std::declval<T>() ) ),
-        decltype( std::declval<Problem &>().set_affine_shift( std::declval<T>() ) ),
-        decltype( std::declval<Problem &>().apply( std::declval<const Vector &>(), std::declval<Vector &>() ) ),
-        decltype( std::declval<Problem &>().set_linearization_point( std::declval<const Vector &>() ) ),
-        decltype( std::declval<Problem &>().get_jacobi_operator() ),
-        decltype( std::declval<Problem &>().previous_state() ), decltype( std::declval<Problem &>().known_rhs() ),
-        decltype( std::declval<const Problem &>().previous_state() ),
-        decltype( std::declval<const Problem &>().known_rhs() )>>
-    : std::bool_constant<
-          std::is_same_v<decltype( std::declval<Problem &>().previous_state() ), Vector &> &&
-          std::is_same_v<decltype( std::declval<Problem &>().known_rhs() ), Vector &> &&
-          std::is_same_v<decltype( std::declval<const Problem &>().previous_state() ), const Vector &> &&
-          std::is_same_v<decltype( std::declval<const Problem &>().known_rhs() ), const Vector &> &&
-          std::is_convertible_v<
-              decltype( std::declval<Problem &>().get_jacobi_operator() ),
-              std::shared_ptr<const typename Problem::jacobi_operator_type>>>
-{
-};
+using nmfd::time_steppers::detail::has_implicit_stage_interface;
 }
 
 template <
@@ -114,6 +75,7 @@ public:
     {
         std::string  method           = "IE";
         unsigned int maximum_attempts = 32;
+        scalar_type  reference_time   = scalar_type( 1 );
     };
 
     static_assert(
@@ -153,6 +115,7 @@ public:
     {
         if ( p.maximum_attempts == 0 )
             throw std::invalid_argument( "Empty DIRK attempt budget" );
+        nmfd::time_steppers::detail::balanced_affine_shift( scalar_type( 0 ), p.reference_time );
         if ( table_.type() == butcher_table::scheme_type::explicit_rk )
             throw std::invalid_argument( "Use the explicit stepper for an entirely explicit table" );
         if constexpr ( DenseOutput )
@@ -550,7 +513,8 @@ private:
                     status_ = single_step_status::failed_nonfinite;
                     return false;
                 }
-                problem_->set_affine_shift( alpha );
+                const auto shift = nmfd::time_steppers::detail::balanced_affine_shift( alpha, params_.reference_time );
+                problem_->set_affine_shift( shift.a, shift.b );
                 if ( !solver_->solve( *work_ ) )
                 {
                     status_ = single_step_status::failed_solver;

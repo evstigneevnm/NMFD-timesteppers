@@ -52,21 +52,25 @@ struct growth
     std::shared_ptr<operations_type> ops;
     double                           time  = 0;
     unsigned int                     calls = 0, fail_call = 0;
+    bool                             fail_solve = false;
 
     void set_time( double t )
     {
         time = t;
     }
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         ++calls;
+        if ( calls == fail_call && fail_solve )
+            return false;
         ops->assign( in, out );
         ops->add_mul_scalar( time, 1., out );
         if ( calls == fail_call )
         {
             ops->assign_scalar( std::numeric_limits<double>::infinity(), out );
         }
+        return true;
     }
 };
 
@@ -306,6 +310,23 @@ void check_lifecycle(
         refused = true;
     }
     require( refused, "No dense output after failed preparation" );
+    bad_owner->calls      = 0;
+    bad_owner->fail_solve = true;
+    failed.apply( in, out );
+    require(
+        failed.get_status() == nmfd::time_steppers::single_step_status::failed_solver && read( ops, out ) == 77,
+        "Failed endpoint mass solve published a candidate"
+    );
+    refused = false;
+    try
+    {
+        failed.get_continuous_integration();
+    }
+    catch ( const std::logic_error & )
+    {
+        refused = true;
+    }
+    require( refused, "Failed endpoint mass solve published dense output" );
 }
 
 struct section_manager

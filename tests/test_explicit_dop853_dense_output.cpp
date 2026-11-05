@@ -75,10 +75,11 @@ struct exponential_growth
         return std::exp( time );
     }
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         ++calls;
         operations->assign( in, out );
+        return true;
     }
 };
 
@@ -98,7 +99,7 @@ struct forced_growth
         time = value;
     }
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         ++calls;
         operations->assign( in, out );
@@ -107,6 +108,7 @@ struct forced_growth
         {
             operations->assign_scalar( std::numeric_limits<double>::infinity(), out );
         }
+        return true;
     }
 };
 
@@ -120,10 +122,11 @@ struct quadratic_growth
         return 1 / ( 1 - time );
     }
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         ++calls;
         operations->mul_pointwise( 1., in, 1., in, out );
+        return true;
     }
 };
 

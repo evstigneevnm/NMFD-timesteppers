@@ -12,6 +12,9 @@
 #ifdef TEST_VECTOR_BACKEND_CUDA
 #    include <scfd/backend/cuda.h>
 using backend_type = scfd::backend::cuda<std::ptrdiff_t>;
+#elif defined( TEST_VECTOR_BACKEND_HIP )
+#    include <scfd/backend/hip.h>
+using backend_type = scfd::backend::hip<std::ptrdiff_t>;
 #elif defined( TEST_VECTOR_BACKEND_OMP )
 #    include <scfd/backend/omp.h>
 using backend_type = scfd::backend::omp<std::ptrdiff_t>;
@@ -50,20 +53,18 @@ struct stage_scaling
     double mass, rhs;
 };
 
-// Differential rows only: evaluate a*M*(u-previous)-b*(f+known_rhs) directly.
-// The problem freezes these coefficients for the whole nonlinear stage solve.
+// Test assembly uses the same normalization as the stepper, never the problem.
 inline stage_scaling balanced_stage_scaling( double alpha, double reference_time = 1 )
 {
-    if ( !std::isfinite( alpha ) || !std::isfinite( reference_time ) || reference_time <= 0 )
-        throw std::invalid_argument( "Stage shift must be finite and reference time positive and finite" );
-    const auto inverse_time = 1 / reference_time;
-    if ( !std::isfinite( inverse_time ) || inverse_time <= 0 )
-        throw std::invalid_argument( "Stage reference inverse time is not representable" );
-    const auto          scale = std::max( std::abs( alpha ), inverse_time );
-    const stage_scaling result{ alpha / scale, 1 / scale };
-    if ( !std::isfinite( result.rhs ) || result.rhs <= 0 )
-        throw std::invalid_argument( "Stage RHS scale is not representable" );
-    return result;
+    const auto shift = detail::balanced_affine_shift( alpha, reference_time );
+    return { shift.a, shift.b };
+}
+
+template <class Problem>
+void set_test_shift( Problem &problem, double alpha, double reference_time = 1 )
+{
+    const auto shift = balanced_stage_scaling( alpha, reference_time );
+    problem.set_affine_shift( shift.mass, shift.rhs );
 }
 
 template <class Mapping>
@@ -120,12 +121,11 @@ public:
     using state_type           = scfd::static_vec::vec<double, Equation::size>;
 
     Equation     equation;
-    double       time = 0, alpha = 0;
+    double       time           = 0;
     unsigned int linearizations = 0;
 
-    explicit stage_problem( std::shared_ptr<operations_type> operations, Equation e = {}, double reference_time = 1 )
-        : equation( e ), reference_time_( reference_time ), scaling_( balanced_stage_scaling( 0, reference_time ) ),
-          operations_( std::move( operations ) ), previous_( *operations_ ), rhs_( *operations_ ),
+    explicit stage_problem( std::shared_ptr<operations_type> operations, Equation e = {} )
+        : equation( e ), operations_( std::move( operations ) ), previous_( *operations_ ), rhs_( *operations_ ),
           jacobi_( std::make_shared<jacobi_operator_type>() )
     {
         require( operations_->size() == Equation::size, "Implicit test problem dimension mismatch" );
@@ -136,11 +136,11 @@ public:
     {
         time = t;
     }
-    void set_affine_shift( double value )
+    void set_affine_shift( double a, double b )
     {
-        const auto updated = balanced_stage_scaling( value, reference_time_ );
-        alpha              = value;
-        scaling_           = updated;
+        if ( !std::isfinite( a ) || !std::isfinite( b ) || b <= 0 )
+            throw std::invalid_argument( "Invalid stage coefficients" );
+        scaling_ = { a, b };
     }
     const stage_scaling &scaling() const
     {
@@ -193,8 +193,7 @@ public:
     }
 
 private:
-    double                                reference_time_;
-    stage_scaling                         scaling_;
+    stage_scaling                         scaling_{ 0, 1 };
     std::shared_ptr<operations_type>      operations_;
     vector_wrap_type                      previous_, rhs_;
     std::shared_ptr<jacobi_operator_type> jacobi_;
@@ -290,7 +289,7 @@ void check_jacobian(
     operations->assign_scalar( .2, problem.previous_state() );
     operations->assign_scalar( .1, problem.known_rhs() );
     problem.set_time( time );
-    problem.set_affine_shift( alpha );
+    set_test_shift( problem, alpha );
     problem.set_linearization_point( *state );
     auto jacobi = problem.get_jacobi_operator();
     jacobi->apply( *direction, *derivative );

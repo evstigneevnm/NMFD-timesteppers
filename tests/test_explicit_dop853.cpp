@@ -45,10 +45,11 @@ struct linear_growth
     std::shared_ptr<operations_type> operations;
     std::size_t                      calls = 0;
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         ++calls;
         operations->assign( in, out );
+        return true;
     }
 };
 
@@ -63,11 +64,12 @@ struct forced_growth
         time = value;
     }
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         ++calls;
         operations->assign( in, out );
         operations->add_mul_scalar( time, 1., out );
+        return true;
     }
 };
 
@@ -76,10 +78,11 @@ struct quadratic_growth
     std::shared_ptr<operations_type> operations;
     std::size_t                      calls = 0;
 
-    void apply( const vector_type &in, vector_type &out )
+    bool evaluate_rate( const vector_type &in, vector_type &out )
     {
         ++calls;
         operations->mul_pointwise( 1., in, 1., in, out );
+        return true;
     }
 };
 
@@ -93,9 +96,10 @@ struct limited_rate
         time = value;
     }
 
-    void apply( const vector_type &, vector_type &out )
+    bool evaluate_rate( const vector_type &, vector_type &out )
     {
         operations->assign_scalar( time > .75 ? std::numeric_limits<double>::infinity() : 1., out );
+        return true;
     }
 };
 

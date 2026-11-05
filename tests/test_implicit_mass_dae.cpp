@@ -18,14 +18,14 @@ void test_dae_scaling(
     result.start_use();
     for ( const double reference_time : { .25, 4. } )
     {
-        problem_type problem( operations, {}, reference_time );
+        problem_type problem( operations );
         operations->assign_scalar( .2, problem.previous_state() );
         operations->assign_scalar( .1, problem.known_rhs() );
         operations->set( point.d, *state, Equation::size );
         problem.set_time( .4 );
         for ( const double alpha : { -1e12, -1e-12, 0., 1e-12, 1e12 } )
         {
-            problem.set_affine_shift( alpha );
+            set_test_shift( problem, alpha, reference_time );
             problem.apply( *state, *result );
             const auto actual = operations->get_value_at_point( Equation::size - 1, *result );
             require(

@@ -21,10 +21,10 @@ public:
     unsigned int        rate_calls = 0;
     std::vector<double> rate_times, implicit_times;
 
-    void set_affine_shift( double alpha )
+    void set_affine_shift( double a, double b )
     {
         implicit_times.push_back( this->time );
-        base_type::set_affine_shift( alpha );
+        base_type::set_affine_shift( a, b );
     }
     struct rate_mapping
     {

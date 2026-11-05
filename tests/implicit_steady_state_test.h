@@ -2,6 +2,7 @@
 #define NMFD_TIME_STEPPERS_TESTS_IMPLICIT_STEADY_STATE_H
 
 #include "implicit_ode_test.h"
+#include <limits>
 #include <nmfd/time_steppers/integration/time_step_adaptation_globalization.h>
 
 namespace nmfd
@@ -23,7 +24,8 @@ public:
     }
     double operator()( const vector_type &state )
     {
-        problem_->equation.apply( state, *residual_ );
+        if ( !problem_->equation.evaluate_rate( state, *residual_ ) )
+            return std::numeric_limits<double>::infinity();
         return operations_->norm_l2( *residual_ );
     }
 

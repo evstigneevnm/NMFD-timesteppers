@@ -52,9 +52,10 @@ using vector_type = operations_type::vector_type;
 struct problem_type
 {
     std::shared_ptr<operations_type> operations;
-    void                             apply( const vector_type &, vector_type &out )
+    bool                             evaluate_rate( const vector_type &, vector_type &out )
     {
         operations->assign_scalar( 1., out );
+        return true;
     }
 };
 using adaptation_type = nmfd::time_steppers::integration::time_step_adaptation_constant<operations_type>;
