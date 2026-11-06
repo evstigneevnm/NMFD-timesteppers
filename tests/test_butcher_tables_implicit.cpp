@@ -116,10 +116,70 @@ try
             }
         }
     }
-    const auto               embedded_pair = make_imex_butcher_table( "IMEX_ARK324L2SA" );
+    const auto embedded_pair = make_imex_butcher_table( "IMEX_ARK324L2SA" );
+    require(
+        embedded_pair.has_dense_output() && embedded_pair.dense_order() == 3, "Missing combined ARK Hermite extension"
+    );
+    // Expand the combined endpoint into its own explicit evaluation row, in BOTH colors.
+    // Check continuous colored-tree conditions through order three at interior theta.
+    for ( const long double theta : { .13L, .37L, .71L, 1.L } )
+    {
+        const auto  w = embedded_pair.dense_weights( theta );
+        const auto &e = embedded_pair.explicit_table;
+        const auto &i = embedded_pair.implicit_table;
+        require( std::abs( w.initial_state + w.final_state - 1 ) < 1e-17L, "Dense state weights" );
+        for ( const auto *root : { &e, &i } )
+        {
+            auto weight = [&]( std::size_t j ) {
+                return j == e.size() ? w.final_rate : w.final_state * root->b( j ) + ( j == 0 ? w.initial_rate : 0 );
+            };
+            long double sum = 0, bc = 0, bcc = 0;
+            for ( std::size_t j = 0; j <= e.size(); ++j )
+            {
+                const auto c = j == e.size() ? 1.L : e.c( j );
+                sum += weight( j );
+                bc += weight( j ) * c;
+                bcc += weight( j ) * c * c;
+            }
+            require(
+                std::abs( sum - theta ) < 1e-14L && std::abs( bc - theta * theta / 2 ) < 1e-14L &&
+                    std::abs( bcc - theta * theta * theta / 3 ) < 1e-14L,
+                "Combined IMEX dense bush conditions"
+            );
+            for ( const auto *child : { &e, &i } )
+                for ( const auto *grandchild : { &e, &i } )
+                {
+                    long double bac = 0;
+                    for ( std::size_t j = 0; j <= e.size(); ++j )
+                        for ( std::size_t k = 0; k < e.size(); ++k )
+                            bac +=
+                                weight( j ) * ( j == e.size() ? child->b( k ) : child->a( j, k ) ) * grandchild->c( k );
+                    require(
+                        std::abs( bac - theta * theta * theta / 6 ) < 1e-14L, "Combined IMEX dense chain conditions"
+                    );
+                }
+        }
+    }
+    for ( const auto *method : { "IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233" } )
+        require( !make_imex_butcher_table( method ).has_dense_output(), "Unvalidated dense extension enabled" );
+    {
+        auto pair    = make_imex_butcher_table( "IMEX_ARS222" );
+        bool refused = false;
+        try
+        {
+            imex_butcher_table invalid(
+                pair.explicit_table, pair.implicit_table, 2, 0, imex_butcher_table::dense_output_type::endpoint_hermite
+            );
+        }
+        catch ( const std::invalid_argument & )
+        {
+            refused = true;
+        }
+        require( refused, "Order-two pair claimed a third-order dense extension" );
+    }
     const imex_butcher_table unpaired( embedded_pair.explicit_table, embedded_pair.implicit_table, 3 );
     require(
-        !unpaired.is_embedded() && unpaired.error_order() == 0,
+        !unpaired.is_embedded() && unpaired.error_order() == 0 && !unpaired.has_dense_output(),
         "Independent partition embeddings silently enabled an IMEX estimator"
     );
     for ( const unsigned int order : { 1u, 3u } )

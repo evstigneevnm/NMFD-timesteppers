@@ -240,7 +240,31 @@ try
             ops->norm_l2( *out ) / std::sqrt( double( ops->size() ) ) < 1e-6, "Backend-local adaptive IMEX accuracy"
         );
     }
-    std::cout << "Fixed/adaptive matrix-free IMEX, 8192 unknowns and blocked vector-sized host transfers: PASS\n";
+    using dense_step = runge_kutta::imex_time_step<space_type, problem, adaptive_controller, solver, true>;
+    dense_step dense(
+        ops, assembly, std::make_shared<adaptive_controller>( ops, p ), newton, dense_step::params{ "IMEX_ARK324L2SA" }
+    );
+    buffer_type sample( *ops );
+    sample.start_use();
+    for ( int run = 0; run < 2; ++run )
+    {
+        dense.reset();
+        dense.set_target_time( .2 );
+        dense.apply( *initial, *out );
+        require( dense.get_status() == single_step_status::converged, "Backend-local dense IMEX solve failed" );
+        const auto view = dense.get_continuous_integration();
+        for ( const auto theta : { 0., .13, .53, .87, 1. } )
+        {
+            const auto time = view.evaluate( theta, *sample );
+            ops->add_mul_scalar( -std::exp( -time ), 1., *sample );
+            require(
+                ops->norm_l2( *sample ) / std::sqrt( double( ops->size() ) ) < 1e-6,
+                "Backend-local IMEX dense sample error"
+            );
+        }
+        dense.finalize( adaptation_status::accepted, dense.get_dt(), *out );
+    }
+    std::cout << "Fixed/adaptive/dense matrix-free IMEX, 8192 unknowns and blocked vector-sized host transfers: PASS\n";
 }
 catch ( const std::exception &error )
 {

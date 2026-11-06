@@ -77,6 +77,71 @@ struct trajectory_writer
     }
 };
 
+// Sample through the external-manager boundary, before the integrator finalizes
+// the pending step. Keep accepted-step accounting in the original trajectory.
+template <class Equation, class Step>
+struct dense_trajectory_writer : trajectory_writer<Equation>
+{
+    using base = trajectory_writer<Equation>;
+    trajectory_writer<Equation> samples;
+    std::shared_ptr<Step>       step;
+    vector_wrap_type            sample;
+    double                      start, spacing, target, begin = 0, last_sample;
+    std::size_t                 index = 1;
+
+    dense_trajectory_writer(
+        std::shared_ptr<operations_type> ops, const std::string &path, const json &metadata,
+        std::shared_ptr<Step> method
+    )
+        : base( ops, path, metadata ), samples(
+                                           ops, path.substr( 0, path.size() - 4 ) + ".dense.dat",
+                                           [&] {
+                                               auto m        = metadata;
+                                               m["sampling"] = "uniform_dense";
+                                               return m;
+                                           }()
+                                       ),
+          step( std::move( method ) ), sample( *ops ), start( metadata.at( "start_time" ).template get<double>() ),
+          spacing( metadata.at( "sample_step" ).template get<double>() ),
+          target( metadata.at( "end_time" ).template get<double>() ), last_sample( start )
+    {
+        sample.start_use();
+    }
+    void record( double time, const vector_type &state )
+    {
+        base::record( time, state );
+        samples.record( time, state );
+    }
+    void set_time_interval( const double &from, double &to )
+    {
+        begin = from;
+        base::set_time_interval( from, to );
+    }
+    bool apply( const vector_type &in, vector_type &out )
+    {
+        const auto view = step->get_continuous_integration();
+        for ( double next = start + double( index ) * spacing; next <= this->time;
+              next        = start + double( ++index ) * spacing )
+        {
+            require( std::isfinite( next ) && next > last_sample, "Uniform sample time did not advance" );
+            const auto theta = std::clamp( ( next - begin ) / step->get_dt(), 0., 1. );
+            last_sample      = view.evaluate( theta, *sample );
+            samples.record( last_sample, *sample );
+        }
+        if ( this->time == target && last_sample < target )
+        {
+            samples.record( target, out );
+            last_sample = target;
+        }
+        return base::apply( in, out );
+    }
+    void complete( json report )
+    {
+        samples.complete( report );
+        base::complete( std::move( report ) );
+    }
+};
+
 struct benchmark_constant_controller : adaptation_type
 {
     using adaptation_type::adaptation_type;
@@ -98,7 +163,7 @@ struct benchmark_constant_controller : adaptation_type
     }
 };
 
-template <class Equation, class Controller, bool IMEX = false>
+template <class Equation, class Controller, bool IMEX = false, bool Dense = false>
 int integrate(
     const Equation &equation, const json &config, const std::string &path, const std::string &method,
     const std::string &controller
@@ -111,8 +176,12 @@ int integrate(
     using flow_problem_type = std::conditional_t<IMEX, benchmark_imex_problem<Equation>, problem_type>;
     using step_type         = std::conditional_t<
                 IMEX,
-                runge_kutta::imex_time_step<operations_type, flow_problem_type, control_type, typename types::solver_type>,
-                runge_kutta::implicit_time_step<operations_type, problem_type, control_type, typename types::solver_type>>;
+                runge_kutta::imex_time_step<
+                    operations_type, flow_problem_type, control_type, typename types::solver_type, Dense>,
+                runge_kutta::implicit_time_step<
+                    operations_type, problem_type, control_type, typename types::solver_type, Dense>>;
+    using writer_type =
+        std::conditional_t<Dense, dense_trajectory_writer<Equation, step_type>, trajectory_writer<Equation>>;
     const auto &settings   = config.at( "adaptation" );
     auto        ops        = std::make_shared<operations_type>( Equation::size );
     auto        adaptation = [&]() {
@@ -165,18 +234,24 @@ int integrate(
     initial.start_use();
     result.start_use();
     ops->set( initial_values.data(), *initial, Equation::size );
-    auto metadata          = config;
-    metadata["format"]     = "nmfd.dirk_system.v1";
-    metadata["dimension"]  = Equation::size;
-    metadata["method"]     = method;
-    metadata["controller"] = controller;
-    metadata["backend"]    = backend_name;
-    metadata["scheme"]     = IMEX ? "imex" : "dirk";
+    auto metadata                  = config;
+    metadata["format"]             = "nmfd.dirk_system.v1";
+    metadata["dimension"]          = Equation::size;
+    metadata["method"]             = method;
+    metadata["controller"]         = controller;
+    metadata["backend"]            = backend_name;
+    metadata["scheme"]             = IMEX ? "imex" : "dirk";
+    metadata["dense_output_order"] = step->dense_output_order();
     if constexpr ( IMEX )
         metadata["splitting"] = config.at( "splitting" );
-    auto writer = std::make_shared<trajectory_writer<Equation>>( ops, path, metadata );
+    auto writer = [&]() {
+        if constexpr ( Dense )
+            return std::make_shared<writer_type>( ops, path, metadata, step );
+        else
+            return std::make_shared<writer_type>( ops, path, metadata );
+    }();
     writer->record( start, *initial );
-    integration::time_integrator<operations_type, step_type, trajectory_writer<Equation>> integrator(
+    integration::time_integrator<operations_type, step_type, writer_type> integrator(
         ops, step, { config.at( "maximum_steps" ).get<std::size_t>() }, writer
     );
     integrator.set_time_interval( start, end );
@@ -214,6 +289,8 @@ int select_method(
                 controller == "constant" || runge_kutta::make_imex_butcher_table( method ).is_embedded(),
                 "This IMEX table requires the constant controller"
             );
+            if ( config.value( "sample_step", 0. ) > 0 )
+                return integrate<Equation, Controller, true, true>( equation, config, path, method, controller );
             return integrate<Equation, Controller, true>( equation, config, path, method, controller );
         }
         else

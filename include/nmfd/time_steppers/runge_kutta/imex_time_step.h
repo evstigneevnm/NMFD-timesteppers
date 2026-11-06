@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
@@ -14,10 +15,31 @@
 #include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
 #include <nmfd/time_steppers/runge_kutta/butcher_tables.h>
+#include <nmfd/time_steppers/runge_kutta/continuous_integration.h>
 #include <nmfd/time_steppers/runge_kutta/imex_operator.h>
 
 namespace nmfd::time_steppers::runge_kutta
 {
+namespace detail
+{
+template <class VectorOperations, bool Enabled>
+struct imex_dense_storage
+{
+    explicit imex_dense_storage( const VectorOperations & )
+    {
+    }
+};
+
+template <class VectorOperations>
+struct imex_dense_storage<VectorOperations, true>
+{
+    nmfd::detail::vector_wrap<VectorOperations, false, false> previous;
+    explicit imex_dense_storage( const VectorOperations &operations ) : previous( operations )
+    {
+    }
+};
+}
+
 template <
     class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false>
 class imex_time_step
@@ -73,11 +95,11 @@ public:
               adaptation ? std::move( adaptation ) : throw std::invalid_argument( "IMEX requires time adaptation" )
           ),
           solver_( solver ? std::move( solver ) : throw std::invalid_argument( "IMEX requires a nonlinear solver" ) ),
-          params_( p ),
-          table_(
-              std::move( table.explicit_table ), std::move( table.implicit_table ), table.order, table.embedded_order()
-          ),
-          work_( *operations_ ), error_( *operations_ )
+          params_( p ), table_(
+                            std::move( table.explicit_table ), std::move( table.implicit_table ), table.order,
+                            table.embedded_order(), table.dense_type()
+                        ),
+          work_( *operations_ ), error_( *operations_ ), dense_( *operations_ )
     {
         if ( !partitions_ || !partitions_->explicit_part || !partitions_->implicit_part )
             throw std::invalid_argument( "IMEX requires both partition operators" );
@@ -85,7 +107,13 @@ public:
             throw std::invalid_argument( "Empty IMEX attempt budget" );
         nmfd::time_steppers::detail::balanced_affine_shift( scalar_type( 0 ), p.reference_time );
         if constexpr ( DenseOutput )
-            throw std::invalid_argument( "IMEX requires a validated combined dense extension" );
+        {
+            if ( !table_.has_dense_output() )
+                throw std::invalid_argument( "IMEX requires a validated combined dense extension" );
+            if constexpr ( !nmfd::time_steppers::detail::has_rate_evaluation<
+                               implicit_operator_type, vector_type>::value )
+                throw std::invalid_argument( "IMEX dense output requires both partition rate providers" );
+        }
         if constexpr ( nmfd::time_steppers::detail::has_embedded_assessment<
                            TimeStepAdaptation, vector_type, scalar_type>::value )
             estimate_error_ = adaptation_->requires_error_estimate() && table_.is_embedded();
@@ -108,6 +136,11 @@ public:
         }
         allocate_rates( e, explicit_rates_ );
         allocate_rates( i, implicit_rates_ );
+        if constexpr ( DenseOutput )
+        {
+            dense_.previous.init();
+            dense_.previous.start_use();
+        }
         solver_->set_nonlinear_operator( partitions_->implicit_part );
     }
 
@@ -143,12 +176,22 @@ public:
     }
     unsigned int dense_output_order() const
     {
-        return 0;
+        return DenseOutput ? table_.dense_order() : 0;
+    }
+
+    // Borrow the pending combined solution until finalize(), reset(), or apply().
+    template <bool Enabled = DenseOutput, std::enable_if_t<Enabled && DenseOutput, int> = 0>
+    continuous_integration<imex_time_step> get_continuous_integration() const
+    {
+        if ( !pending_ )
+            throw std::logic_error( "No pending IMEX dense output" );
+        return { *this, generation_ };
     }
 
     void reset()
     {
         adaptation_->reset();
+        ++generation_;
         initialized_ = pending_ = false;
         attempts_               = 0;
         dt_                     = 0;
@@ -159,6 +202,7 @@ public:
     void apply( const vector_type &in, vector_type &out )
     {
         require_finalized();
+        ++generation_;
         attempts_ = 0;
         if ( adaptation_->requires_error_estimate() && !estimate_error_ )
         {
@@ -198,6 +242,14 @@ public:
             const auto  decision = assess( in, next_dt );
             if ( decision == adaptation_status::accepted )
             {
+                if constexpr ( DenseOutput )
+                    if ( !prepare_dense( in ) )
+                    {
+                        if ( adaptation_->reject_step( dt_ ) != adaptation_status::rejected )
+                            return;
+                        adaptation_->update( adaptation_status::rejected, time_, dt_, in );
+                        continue;
+                    }
                 operations_->assign( *work_, out );
                 pending_ = true;
                 status_  = single_step_status::converged;
@@ -217,7 +269,7 @@ public:
     {
         if ( !pending_ )
             throw std::logic_error( "No IMEX candidate to finalize" );
-        const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+        const auto endpoint = endpoint_time();
         if ( !std::isfinite( committed_time ) || ( dt_ > 0 ? committed_time < time_ || committed_time > endpoint
                                                            : committed_time > time_ || committed_time < endpoint ) )
             throw std::invalid_argument( "Committed time is outside the pending IMEX step" );
@@ -227,18 +279,27 @@ public:
 
 private:
     using vector_wrap_type = nmfd::detail::vector_wrap<VectorOperations, false, false>;
-    std::shared_ptr<VectorOperations>   operations_;
-    std::shared_ptr<imex_operator_type> partitions_;
-    std::shared_ptr<TimeStepAdaptation> adaptation_;
-    std::shared_ptr<NonlinearSolver>    solver_;
-    params                              params_;
-    imex_butcher_table                  table_;
-    vector_wrap_type                    work_, error_;
-    std::vector<vector_wrap_type>       explicit_rates_, implicit_rates_;
-    scalar_type                         time_ = 0, target_ = 1, dt_ = 0;
-    unsigned int                        attempts_ = 0;
+    std::shared_ptr<VectorOperations>                         operations_;
+    std::shared_ptr<imex_operator_type>                       partitions_;
+    std::shared_ptr<TimeStepAdaptation>                       adaptation_;
+    std::shared_ptr<NonlinearSolver>                          solver_;
+    params                                                    params_;
+    imex_butcher_table                                        table_;
+    vector_wrap_type                                          work_, error_;
+    std::vector<vector_wrap_type>                             explicit_rates_, implicit_rates_;
+    detail::imex_dense_storage<VectorOperations, DenseOutput> dense_;
+    std::size_t                                               generation_ = 0;
+    scalar_type                                               time_ = 0, target_ = 1, dt_ = 0;
+    unsigned int                                              attempts_ = 0;
     bool               stiffly_accurate_ = false, estimate_error_ = false, initialized_ = false, pending_ = false;
     single_step_status status_ = single_step_status::idle;
+
+    friend class continuous_integration<imex_time_step>;
+
+    scalar_type endpoint_time() const
+    {
+        return dt_ == target_ - time_ ? target_ : time_ + dt_;
+    }
 
     void require_finalized() const
     {
@@ -247,6 +308,9 @@ private:
     }
     bool needs_rate( const butcher_table &table, std::size_t stage ) const
     {
+        if constexpr ( DenseOutput )
+            if ( stage == 0 )
+                return true;
         if ( ( !stiffly_accurate_ && table.b( stage ) != 0 ) || ( estimate_error_ && table.error_b( stage ) != 0 ) )
             return true;
         for ( std::size_t j = stage + 1; j < table.size(); ++j )
@@ -260,7 +324,7 @@ private:
         for ( std::size_t j = 0; j < table.size(); ++j )
         {
             rates.emplace_back( *operations_ );
-            if ( needs_rate( table, j ) )
+            if ( needs_rate( table, j ) || ( DenseOutput && j + 1 == table.size() ) )
             {
                 rates.back().init();
                 rates.back().start_use();
@@ -291,6 +355,72 @@ private:
             return false;
         }
         return valid( rate );
+    }
+
+    // Only accepted candidates need fresh rates at the actual combined endpoint.
+    // Retired stage buffers become total initial/endpoint rates; no history is kept.
+    bool prepare_dense( const vector_type &in )
+    {
+        static_assert( DenseOutput, "Dense output is disabled" );
+        auto      &e = *partitions_->explicit_part;
+        auto      &i = *partitions_->implicit_part;
+        const auto restore_time =
+            time_ +
+            dt_ * scalar_type( stiffly_accurate_ ? 1 : table_.explicit_table.c( table_.explicit_table.size() - 1 ) );
+        const auto restore = [&]() {
+            if constexpr ( nmfd::time_steppers::detail::has_set_time<explicit_operator_type, scalar_type>::value )
+                e.set_time( restore_time );
+            i.set_time( restore_time );
+        };
+        bool ok = false;
+        try
+        {
+            if constexpr ( nmfd::time_steppers::detail::has_set_time<explicit_operator_type, scalar_type>::value )
+                e.set_time( endpoint_time() );
+            i.set_time( endpoint_time() );
+            if constexpr ( nmfd::time_steppers::detail::has_rate_evaluation<
+                               implicit_operator_type, vector_type>::value )
+                ok = evaluate_rate( e, *work_, *explicit_rates_.back() ) &&
+                     evaluate_rate( i, *work_, *implicit_rates_.back() );
+        }
+        catch ( ... )
+        {
+            restore();
+            throw;
+        }
+        restore();
+        if ( !ok )
+            return false;
+        operations_->add_lin_comb( scalar_type( 1 ), *implicit_rates_.front(), *explicit_rates_.front() );
+        operations_->add_lin_comb( scalar_type( 1 ), *implicit_rates_.back(), *explicit_rates_.back() );
+        if ( !valid( *explicit_rates_.front() ) || !valid( *explicit_rates_.back() ) )
+            return false;
+        operations_->assign( in, *dense_.previous );
+        return true;
+    }
+
+    // Sampling uses stored backend vectors only; caller-owned outputs may alias inputs.
+    scalar_type evaluate_dense( scalar_type theta, vector_type &out, std::size_t generation ) const
+    {
+        static_assert( DenseOutput, "Dense output is disabled" );
+        if ( !pending_ || generation != generation_ )
+            throw std::logic_error( "Expired IMEX dense output" );
+        if ( !std::isfinite( theta ) || theta < 0 || theta > 1 )
+            throw std::invalid_argument( "Dense-output theta must be in [0,1]" );
+        if ( theta == 0 )
+            operations_->assign( *dense_.previous, out );
+        else if ( theta == 1 )
+            operations_->assign( *work_, out );
+        else
+        {
+            const auto weights = table_.dense_weights( theta );
+            operations_->assign_lin_comb(
+                scalar_type( weights.initial_state ), *dense_.previous, scalar_type( weights.final_state ), *work_, out
+            );
+            operations_->add_lin_comb( dt_ * scalar_type( weights.initial_rate ), *explicit_rates_.front(), out );
+            operations_->add_lin_comb( dt_ * scalar_type( weights.final_rate ), *explicit_rates_.back(), out );
+        }
+        return theta == 1 ? endpoint_time() : time_ + theta * dt_;
     }
 
     // The reference contains BOTH known rate sums; the shifted residual adds only f_I.

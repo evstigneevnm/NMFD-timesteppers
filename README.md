@@ -324,8 +324,10 @@ pair's primary and embedded coupling conditions. Old three-argument construction
 is unchanged. An error-requiring controller without a paired estimate reports
 `error_estimate_unavailable` before stage work.
 
-There is no validated combined continuous extension yet.
-`DenseOutput=true` is rejected during construction; no dense view is exposed.
+`IMEX_ARK324L2SA` also opts into combined endpoint-Hermite dense output of order
+three. Enable the fifth template argument and use the existing borrowed
+`get_continuous_integration().evaluate(theta,out)` view. Other named IMEX tables
+still reject `DenseOutput=true`; neither partition's interpolant is a combined one.
 Fixed-step and error-free merit controllers retain their existing acceptance contracts.
 
 `test_implicit_imex.cpp`, `test_implicit_imex_mass.cpp`, and
@@ -479,6 +481,45 @@ Views have the same pending-step lifetime as explicit RK, including rejection,
 reset, modified/shortened endpoints and failed external commits. Sampling either
 endpoint copies the saved numerical state exactly. Adaptive control still targets
 the step error, not an independently estimated interior error.
+
+### IMEX Dense Output
+
+```cpp
+using step_type = runge_kutta::imex_time_step<Space, Problem, Controller, NonlinearSolver, true>;
+// Select IMEX_ARK324L2SA. After successful apply(), before finalize():
+auto dense = step.get_continuous_integration();
+auto time = dense.evaluate(theta, sample);
+```
+
+The cubic extension combines the initial/accepted states with total rates
+`kE+kI` at those states. The first stage supplies the initial rates. Both partition
+providers evaluate fresh rates at the actual combined endpoint only after error
+acceptance; its last internal stage is generally a different state. Required mass
+solves remain problem-owned. Failed/nonfinite endpoint rates enter normal bounded
+rejection; exceptions propagate. Preparation restores both partition times without
+rewriting their reference/RHS buffers or frozen Jacobian.
+
+For ARK, enabling dense output adds one initial-state snapshot and one extra
+`evaluate_rate()` call per partition per numerically accepted attempt. Retired
+stage buffers hold the two total rates, so no extra rate vectors are allocated.
+Sampling uses a fixed number of backend vector operations, no allocations, no
+problem calls and no vector-sized host/device transfers. Disabling dense output
+preserves the existing workspace and call budgets. Views have the same lifetime
+and exact endpoint-copy semantics as the explicit/DIRK views above.
+
+Combined metadata is opt-in: the fifth `imex_butcher_table` constructor argument
+may select `dense_output_type::endpoint_hermite` for a validated pair of order at
+least three with an initial-state first stage. Continuous colored-tree tests check
+the combined extension through order three; independent partition extensions do
+not enable it. This implementation covers ODE/nonsingular-mass formulations, not
+general singular-mass DAEs. It controls endpoint error, not a separate dense error.
+
+`test_implicit_imex_dense_output.cpp` checks forward/backward interior order,
+partition limits, timed nonlinear splitting, mass systems and restart.
+`test_implicit_imex_dense_lifecycle.cpp` covers view lifetime, actual endpoint
+rates, failures, context restoration, bounded retries, optional capabilities and
+allocation/release budgets. The 8192-unknown backend test blocks vector-sized host
+transfers during dense preparation and sampling too.
 
 For DAEs, raw polynomial samples need not satisfy algebraic constraints. The
 application or external manager must perform formulation-specific reconstruction
@@ -711,6 +752,10 @@ bash source/contrib/nmfd-timesteppers/tests/run_all.sh \
 # The four non-embedded IMEX tables use constant stepping (--step sets h).
 bash source/contrib/nmfd-timesteppers/tests/run_all.sh --system coupled_mass \
   --methods IMEX_EULER IMEX_HEUN_TR2 IMEX_ARS222 IMEX_ARS233 --controllers constant
+
+# Optional uniform dense samples, in a separate *.dense.dat trajectory.
+bash source/contrib/nmfd-timesteppers/tests/run_all.sh --system lorenz \
+  --methods IMEX_ARK324L2SA --controllers scipy --sample-step 0.01
 ```
 
 Normal invocations rebuild only stale binaries and leave unchanged assembly files
@@ -739,6 +784,10 @@ Coupled mass splits off-diagonal/diagonal physical RHS terms; scalar mass and
 time-coefficient cases use a 1:3 explicit/implicit RHS split. Both rates solve the
 same problem-owned mass system. Configurations and trajectory metadata record
 the split; reports and plots compare the full state, not individual partitions.
+`--sample-step` enables ARK dense output explicitly. Uniform samples and accepted
+steps retain separate row counts; plots/reference checks cover sampled interiors
+without replacing accepted-step statistics or relaxing the endpoint checks.
+The default remains accepted-step output with dense storage disabled.
 `test_implicit_imex_benchmarks.cpp` checks rate sums against the original equations
 and finite-differences every shifted implicit Jacobian, including mass derivatives.
 

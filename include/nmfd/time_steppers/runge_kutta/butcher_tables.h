@@ -259,13 +259,25 @@ inline butcher_table make_butcher_table( const std::string &name )
 
 struct imex_butcher_table
 {
+    enum class dense_output_type
+    {
+        none,
+        endpoint_hermite
+    };
+    struct dense_weights_type
+    {
+        long double initial_state, final_state, initial_rate, final_rate;
+    };
     butcher_table explicit_table, implicit_table;
     unsigned int  order;
 
     // A combined embedding is opt-in; independent partition embeddings are not sufficient.
-    imex_butcher_table( butcher_table e, butcher_table i, unsigned int p, unsigned int embedded_order = 0 )
+    imex_butcher_table(
+        butcher_table e, butcher_table i, unsigned int p, unsigned int embedded_order = 0,
+        dense_output_type dense = dense_output_type::none
+    )
         : explicit_table( std::move( e ) ), implicit_table( std::move( i ) ), order( p ),
-          embedded_order_( embedded_order )
+          embedded_order_( embedded_order ), dense_type_( dense )
     {
         if ( explicit_table.type() != butcher_table::scheme_type::explicit_rk ||
              implicit_table.type() == butcher_table::scheme_type::irk ||
@@ -286,6 +298,15 @@ struct imex_butcher_table
                 throw std::invalid_argument( "IMEX stage times differ" );
             }
         }
+        if ( dense != dense_output_type::none )
+        {
+            if ( dense != dense_output_type::endpoint_hermite || p < 3 || explicit_table.size() < 2 ||
+                 explicit_table.c( 0 ) != 0 || implicit_table.c( 0 ) != 0 )
+                throw std::invalid_argument( "Incompatible combined IMEX dense extension" );
+            for ( std::size_t j = 0; j < explicit_table.size(); ++j )
+                if ( explicit_table.a( 0, j ) != 0 || implicit_table.a( 0, j ) != 0 )
+                    throw std::invalid_argument( "IMEX Hermite extension requires an initial-state stage" );
+        }
     }
 
     bool is_embedded() const
@@ -300,9 +321,34 @@ struct imex_butcher_table
     {
         return is_embedded() ? embedded_order_ + 1 : 0;
     }
+    dense_output_type dense_type() const
+    {
+        return dense_type_;
+    }
+    bool has_dense_output() const
+    {
+        return dense_type_ != dense_output_type::none;
+    }
+    unsigned int dense_order() const
+    {
+        return has_dense_output() ? 3 : 0;
+    }
+    dense_weights_type dense_weights( long double theta ) const
+    {
+        if ( !has_dense_output() )
+            throw std::logic_error( "No combined IMEX continuous extension" );
+        if ( !std::isfinite( theta ) || theta < 0 || theta > 1 )
+            throw std::invalid_argument( "Dense-output theta must be in [0,1]" );
+        const auto complement = 1 - theta;
+        return {
+            ( 1 + 2 * theta ) * complement * complement, theta * theta * ( 3 - 2 * theta ),
+            theta * complement * complement, theta * theta * ( theta - 1 )
+        };
+    }
 
 private:
-    unsigned int embedded_order_;
+    unsigned int      embedded_order_;
+    dense_output_type dense_type_;
 };
 
 // ARS names use the published (implicit stages, explicit stages, order) triplet,
@@ -329,7 +375,10 @@ inline imex_butcher_table make_imex_butcher_table( const std::string &name )
                 1.038461646937449311660120290221808292156L, 0 } },
             std::move( b ), 3, std::move( c ), std::move( embedded ), 2
         );
-        return { std::move( explicit_table ), std::move( implicit ), 3, 2 };
+        return {
+            std::move( explicit_table ), std::move( implicit ), 3, 2,
+            imex_butcher_table::dense_output_type::endpoint_hermite
+        };
     }
     if ( name == "IMEX_EULER" )
     {

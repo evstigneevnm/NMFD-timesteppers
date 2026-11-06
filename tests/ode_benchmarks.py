@@ -113,6 +113,8 @@ def arguments(argv=None):
     parser.add_argument("--step", type=positive, default=.001)
     parser.add_argument("--min-step", type=positive, default=1e-8)
     parser.add_argument("--max-step", type=positive, default=.05)
+    parser.add_argument("--sample-step", type=positive, default=0,
+                        help="Uniform dense-output spacing; requires --methods IMEX_ARK324L2SA")
     parser.add_argument("--max-steps", type=int, default=2_000_000)
     parser.add_argument("--max-relative-error", type=positive, default=.01)
     parser.add_argument("--methods", choices=METHODS, nargs="+", default=list(DEFAULT_METHODS))
@@ -154,6 +156,10 @@ def configuration(args, system):
         raise ValueError(f"{system}: IMEX benchmarks do not support singular-mass DAEs; select a DIRK method")
     if any(method in FIXED_IMEX_METHODS for method in methods) and "constant" not in args.controllers:
         raise ValueError("Fixed IMEX tables require --controllers constant (no combined embedded estimator)")
+    if args.sample_step and (methods != ["IMEX_ARK324L2SA"] or system not in IMEX_SPLITS):
+        raise ValueError("Uniform dense sampling requires --methods IMEX_ARK324L2SA on an ODE/nonsingular-mass system")
+    if args.sample_step and (start + args.sample_step == start or end - args.sample_step == end):
+        raise ValueError("Dense sample spacing cannot advance the time coordinate")
     cases = [dict(method=method, controller=controller,
                   filename=method.replace("(", "_").replace(")", "_") + "_" + controller + ".dat")
              for method in methods for controller in dict.fromkeys(args.controllers)
@@ -166,6 +172,7 @@ def configuration(args, system):
                                   initial_step=args.step, minimum_step=args.min_step, maximum_step=args.max_step),
                   splitting=IMEX_SPLITS.get(system),
                   skipped_methods=[method for method in dict.fromkeys(args.methods) if method not in methods],
+                  sample_step=args.sample_step,
                   cases=cases)
 
 
@@ -207,6 +214,8 @@ def build_and_assemble(args, configurations):
             launch.extend(["--initial", *map(str, config["initial_state"])])
         launch.extend(["--methods", *dict.fromkeys(case["method"] for case in config["cases"]),
                        "--controllers", *dict.fromkeys(case["controller"] for case in config["cases"])])
+        if args.sample_step:
+            launch.extend(["--sample-step", str(args.sample_step)])
         launcher = system_dir / "run.sh"
         write_if_changed(launcher, "#!/usr/bin/env bash\nset -euo pipefail\nexec " + shlex.join(launch) + ' "$@"\n')
         if not os.access(launcher, os.X_OK):
@@ -237,7 +246,7 @@ def run(args, config, executable, batch):
     return directory
 
 
-def read_trajectory(path, config, case):
+def read_trajectory(path, config, case, sampled=False):
     import numpy as np
     with path.open() as stream:
         first, last = stream.readline(), ""
@@ -264,9 +273,12 @@ def read_trajectory(path, config, case):
         raise ValueError("Unexpected integration scheme")
     if scheme == "imex" and (not config.get("splitting") or metadata.get("splitting") != config["splitting"]):
         raise ValueError("Inconsistent IMEX splitting metadata")
+    if sampled and (metadata.get("sampling") != "uniform_dense" or metadata.get("dense_output_order") != 3
+                    or metadata.get("sample_step") != config.get("sample_step") or not config.get("sample_step")):
+        raise ValueError("Invalid dense sampling metadata")
     if "backend" in config and metadata["backend"] != config["backend"]:
         raise ValueError("Unexpected backend")
-    if (report["rows"] != len(data) or report["accepted_steps"] != len(data) - 1
+    if (report["rows"] != len(data) or (not sampled and report["accepted_steps"] != len(data) - 1)
             or data[0, 0] != config["start_time"] or data[-1, 0] != report["final_time"]
             or not np.array_equal(data[0, 1:-1], config["initial_state"])):
         raise ValueError("Invalid row/step accounting, times, or initial state")
@@ -274,7 +286,13 @@ def read_trajectory(path, config, case):
         raise ValueError("Integration did not complete; inspect its log")
     if np.max(np.abs(data[:, -1])) >= 2e-9:
         raise ValueError("Accepted constraint residual exceeds 2e-9")
-    if np.max(np.diff(data[:, 0])) > config["adaptation"]["maximum_step"] * (1 + 1e-10):
+    if sampled:
+        grid = config["start_time"] + np.arange(len(data) - 1) * config["sample_step"]
+        roundoff = 16 * np.finfo(float).eps * max(1., abs(config["start_time"]), abs(config["end_time"]))
+        if (not np.allclose(data[:-1, 0], grid, rtol=0, atol=roundoff)
+                or np.max(np.diff(data[:, 0])) > config["sample_step"] * (1 + 1e-10)):
+            raise ValueError("Invalid uniform dense sampling grid")
+    elif np.max(np.diff(data[:, 0])) > config["adaptation"]["maximum_step"] * (1 + 1e-10):
         raise ValueError("Accepted step exceeds its configured maximum")
     return data, report
 
@@ -325,6 +343,11 @@ def plot(directory):
         path = directory / case["filename"]
         try:
             data, report = read_trajectory(path, config, case)
+            accepted_data = data
+            if config.get("sample_step"):
+                data, dense_report = read_trajectory(path.with_name(path.stem + ".dense.dat"), config, case, sampled=True)
+                if dense_report["accepted_steps"] != report["accepted_steps"]:
+                    raise ValueError("Dense samples disagree with accepted-step accounting")
         except (OSError, ValueError, KeyError) as error:
             summary["failures"][path.stem] = str(error)
             continue
@@ -332,12 +355,17 @@ def plot(directory):
         differences = np.abs(data[:, 1:-1] - expected)
         relative = np.max(differences / (1 + np.abs(expected)), axis=1)
         comparison = data[:, 0] <= window_end
-        passed = float(relative[comparison].max()) <= config["max_relative_error"]
+        endpoint_expected = reference(accepted_data[:, 0]).T
+        endpoint_relative = np.max(np.abs(accepted_data[:, 1:-1] - endpoint_expected) / (1 + np.abs(endpoint_expected)), axis=1)
+        maximum_error = max(float(relative[comparison].max()),
+                            float(endpoint_relative[accepted_data[:, 0] <= window_end].max()))
+        passed = maximum_error <= config["max_relative_error"]
         summary["cases"][path.stem] = dict(report, passed=passed, elapsed_seconds=case.get("elapsed_seconds"),
-            max_comparison_relative_error=float(relative[comparison].max()),
+            max_comparison_relative_error=maximum_error,
+            dense_rows=len(data) if config.get("sample_step") else 0,
             max_component_absolute_error=differences.max(axis=0).tolist(),
             endpoint_absolute_error=differences[-1].tolist(),
-            minimum_step=float(np.diff(data[:, 0]).min()), maximum_step=float(np.diff(data[:, 0]).max()))
+            minimum_step=float(np.diff(accepted_data[:, 0]).min()), maximum_step=float(np.diff(accepted_data[:, 0]).max()))
         if not passed:
             summary["failures"][path.stem] = "Independent reference error exceeded the configured comparison bound"
         label = case["method"] + " / " + case["controller"]
@@ -345,7 +373,7 @@ def plot(directory):
         sample = data[selection]
         for component, axis in enumerate(axes[:, 0]):
             axis.plot(sample[:, 0], sample[:, component + 1], linewidth=.7, label=label)
-        step_axis.semilogy(data[1:, 0], np.diff(data[:, 0]), linewidth=.7, label=label)
+        step_axis.semilogy(accepted_data[1:, 0], np.diff(accepted_data[:, 0]), linewidth=.7, label=label)
         error_axis.semilogy(sample[:, 0], np.maximum(relative[selection], 1e-16), linewidth=.7, label=label)
         constraint_axis.semilogy(sample[:, 0], np.maximum(np.abs(sample[:, -1]), 1e-18), linewidth=.7, label=label)
         if phase_axis is not None:

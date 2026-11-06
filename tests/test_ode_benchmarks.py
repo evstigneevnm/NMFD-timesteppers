@@ -142,6 +142,21 @@ class BenchmarkAssemblyTests(unittest.TestCase):
         self.assertNotIn("IMEX_", launcher)
         self.assertIn("SDIRK2", launcher)
 
+    def test_uniform_dense_sampling_is_opt_in_and_preserved_in_launchers(self):
+        args = self.args("--system", "lorenz", "--methods", "IMEX_ARK324L2SA", "--sample-step", ".017")
+        config = runner.configuration(args, "lorenz")
+        self.assertEqual(config["sample_step"], .017)
+        with mock.patch.object(runner.subprocess, "run", side_effect=self.fake_make):
+            runner.build_and_assemble(args, [config])
+        self.assertIn("--sample-step 0.017", (self.root / "lorenz/run.sh").read_text())
+        for options in (("--system", "lorenz", "--sample-step", ".01"),
+                        ("--system", "stokes_dae", "--sample-step", ".01"),
+                        ("--system", "lorenz", "--methods", "IMEX_ARK324L2SA", "--sample-step", ".001",
+                         "--start", "1e20", "--end", "1.000000000001e20")):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                args = self.args(*options)
+                runner.configuration(args, args.systems[0])
+
     def test_failed_build_does_not_assemble_or_execute(self):
         args = self.args("-B")
         with mock.patch.object(runner.subprocess, "run", side_effect=subprocess.CalledProcessError(2, "make")):
@@ -281,6 +296,50 @@ class BenchmarkDiagnosticsTests(unittest.TestCase):
         self.save()
         with self.assertRaisesRegex(ValueError, "scheme"):
             runner.read_trajectory(self.path, self.config, self.case)
+
+    def make_dense_samples(self):
+        self.case["method"] = "IMEX_ARK324L2SA"
+        self.config.update(sample_step=.05, splitting=runner.IMEX_SPLITS["coupled_mass"])
+        self.metadata.update(method=self.case["method"], scheme="imex", splitting=self.config["splitting"],
+                             sample_step=.05, dense_output_order=3)
+        self.save()
+        path = self.path.with_name(self.path.stem + ".dense.dat")
+        metadata = dict(self.metadata, sampling="uniform_dense")
+        times = self.np.array([0, .05, .1, .15, .2])
+        data = self.np.column_stack((times, self.np.exp(-times), self.np.exp(-2 * times), times * 0))
+        with path.open("w") as stream:
+            stream.write("# " + json.dumps(metadata) + "\n")
+            self.np.savetxt(stream, data, fmt="%.17g")
+            stream.write("# " + json.dumps(dict(self.report, rows=len(data))) + "\n")
+        return path, data
+
+    def test_uniform_dense_samples_keep_accepted_step_accounting(self):
+        path, expected = self.make_dense_samples()
+        data, report = runner.read_trajectory(path, self.config, self.case, sampled=True)
+        self.np.testing.assert_array_equal(data, expected)
+        self.assertEqual(report["accepted_steps"], 2)
+        with self.assertRaises(ValueError):
+            runner.read_trajectory(path, self.config, self.case)
+        self.config["sample_step"] = .04
+        with self.assertRaises(ValueError):
+            runner.read_trajectory(path, self.config, self.case, sampled=True)
+
+    def test_plot_validates_dense_interior_and_preserves_step_statistics(self):
+        path, data = self.make_dense_samples()
+        (self.root / "config.json").write_text(json.dumps(self.config))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.plot(self.root), 0)
+        summary = json.loads((self.root / "summary.json").read_text())
+        self.assertEqual(summary["cases"][self.path.stem]["dense_rows"], 5)
+        self.assertEqual(summary["cases"][self.path.stem]["minimum_step"], .1)
+        lines = path.read_text().splitlines()
+        data[1, 1] += .5
+        with path.open("w") as stream:
+            stream.write(lines[0] + "\n")
+            self.np.savetxt(stream, data, fmt="%.17g")
+            stream.write(lines[-1] + "\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.plot(self.root), 1)
 
     def test_failed_run_is_rejected(self):
         self.report["status"] = "failed"
