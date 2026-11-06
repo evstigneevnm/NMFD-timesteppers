@@ -6,7 +6,9 @@
 
 namespace nmfd::time_steppers::tests
 {
-inline constexpr const char *imex_methods[] = { "IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233" };
+inline constexpr const char *imex_methods[] = {
+    "IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233", "IMEX_ARK324L2SA"
+};
 
 template <class Explicit, class Implicit>
 struct imex_problem

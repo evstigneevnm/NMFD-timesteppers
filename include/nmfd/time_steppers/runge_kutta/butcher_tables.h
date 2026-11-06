@@ -262,8 +262,10 @@ struct imex_butcher_table
     butcher_table explicit_table, implicit_table;
     unsigned int  order;
 
-    imex_butcher_table( butcher_table e, butcher_table i, unsigned int p )
-        : explicit_table( std::move( e ) ), implicit_table( std::move( i ) ), order( p )
+    // A combined embedding is opt-in; independent partition embeddings are not sufficient.
+    imex_butcher_table( butcher_table e, butcher_table i, unsigned int p, unsigned int embedded_order = 0 )
+        : explicit_table( std::move( e ) ), implicit_table( std::move( i ) ), order( p ),
+          embedded_order_( embedded_order )
     {
         if ( explicit_table.type() != butcher_table::scheme_type::explicit_rk ||
              implicit_table.type() == butcher_table::scheme_type::irk ||
@@ -272,6 +274,10 @@ struct imex_butcher_table
         {
             throw std::invalid_argument( "Incompatible IMEX tables" );
         }
+        if ( embedded_order && ( embedded_order >= p || !explicit_table.is_embedded() ||
+                                 !implicit_table.is_embedded() || embedded_order != explicit_table.embedded_order() ||
+                                 embedded_order != implicit_table.embedded_order() ) )
+            throw std::invalid_argument( "Incompatible combined IMEX embedding" );
         for ( std::size_t j = 0; j < explicit_table.size(); ++j )
         {
             if ( std::abs( explicit_table.c( j ) - implicit_table.c( j ) ) >
@@ -281,12 +287,50 @@ struct imex_butcher_table
             }
         }
     }
+
+    bool is_embedded() const
+    {
+        return embedded_order_ != 0;
+    }
+    unsigned int embedded_order() const
+    {
+        return embedded_order_;
+    }
+    unsigned int error_order() const
+    {
+        return is_embedded() ? embedded_order_ + 1 : 0;
+    }
+
+private:
+    unsigned int embedded_order_;
 };
 
 // ARS names use the published (implicit stages, explicit stages, order) triplet,
 // not the dimensions of the padded tableaux stored here.
 inline imex_butcher_table make_imex_butcher_table( const std::string &name )
 {
+    if ( name == "IMEX_ARK324L2SA" )
+    {
+        // Kennedy-Carpenter ARK3(2)4L[2]SA; LLNL/sundials
+        // src/arkode/arkode_butcher_erk.def, ARKODE_ARK324L2SA_ERK_4_2_3.
+        auto                       implicit = make_butcher_table( "ARK324L2SA" );
+        butcher_table::vector_type b, embedded, c;
+        for ( std::size_t j = 0; j < implicit.size(); ++j )
+        {
+            b.push_back( implicit.b( j ) );
+            embedded.push_back( implicit.embedded_b( j ) );
+            c.push_back( implicit.c( j ) );
+        }
+        butcher_table explicit_table(
+            { { 0, 0, 0, 0 },
+              { .8717330430169179988320389023871136850586L, 0, 0, 0 },
+              { .52758901197630041156180797140291790433L, .07241098802369958843819202859708209566999L, 0, 0 },
+              { .3990960076760701320627260736092142797856L, -.437557654613519443722846363831022571942L,
+                1.038461646937449311660120290221808292156L, 0 } },
+            std::move( b ), 3, std::move( c ), std::move( embedded ), 2
+        );
+        return { std::move( explicit_table ), std::move( implicit ), 3, 2 };
+    }
     if ( name == "IMEX_EULER" )
     {
         return { { { { 0, 0 }, { 1, 0 } }, { 1, 0 }, 1 }, { { { 0, 0 }, { 0, 1 } }, { 0, 1 }, 1 }, 1 };

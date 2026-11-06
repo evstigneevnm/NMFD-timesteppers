@@ -1,4 +1,4 @@
-#include "implicit_imex_test.h"
+#include "implicit_imex_adaptive_test.h"
 #include <limits>
 
 using namespace nmfd::time_steppers;
@@ -475,6 +475,217 @@ void test_modified_endpoint_and_backward()
         }
 }
 
+// A successful numerical retry must rebuild BOTH rate arrays and the error vector.
+void test_adaptive_recovery()
+{
+    using controller     = observed_controller<integration::time_step_adaptation_scipy<operations_type>>;
+    using step_type      = imex_step<problem_type, controller, controlled_solver>;
+    auto             ops = std::make_shared<operations_type>( 1 );
+    vector_wrap_type initial( *ops ), out( *ops ), reference( *ops );
+    initial.start_use();
+    out.start_use();
+    reference.start_use();
+    ops->assign_scalar( 1., *initial );
+    for ( int source = 0; source < 4; ++source )
+        for ( int mode = 0; mode < 2; ++mode )
+        {
+            auto  problem = make_problem( ops );
+            auto  solver  = std::make_shared<controlled_solver>( controlled_solver{ ops, types::make_solver( ops ) } );
+            auto &e       = *problem->partitions->explicit_part;
+            auto &i       = *problem->partitions->implicit_part;
+            e.mode = i.mode = solver->mode = mode;
+            if ( source < 2 )
+                e.fail_on = source + 1;
+            if ( source == 2 )
+                i.fail_on = 1;
+            if ( source == 3 )
+                solver->fail_on = 1;
+            auto p         = controller_parameters<controller>( 1e-5 );
+            p.initial_step = p.maximum_step = .3;
+            auto control                    = std::make_shared<controller>( ops, p );
+            control->expected_order         = 3;
+            step_type step( ops, problem, control, solver, step_type::params{ "IMEX_ARK324L2SA" } );
+            step.apply( *initial, *out );
+            require(
+                step.get_status() == single_step_status::converged && control->numerical_rejections == 1 &&
+                    step.get_attempts() == control->error_rejections + 2 &&
+                    control->assessments == control->error_rejections + 1 && control->commits == 0,
+                "Adaptive IMEX assessed a failed stage or lost bounded recovery"
+            );
+            auto fresh = make_imex_step( ops, make_problem( ops ), step.get_dt(), "IMEX_ARK324L2SA" );
+            fresh->apply( *initial, *reference );
+            require(
+                fresh->get_status() == single_step_status::converged &&
+                    std::abs( ops->get_value_at_point( 0, *out ) - ops->get_value_at_point( 0, *reference ) ) < 1e-12,
+                "Adaptive IMEX recovery retained a failed candidate or derivative"
+            );
+            step.finalize( adaptation_status::accepted, step.get_dt(), *out );
+            fresh->finalize( adaptation_status::accepted, fresh->get_dt(), *reference );
+        }
+}
+
+void test_embedding_capabilities()
+{
+    const auto g = 1.L - std::sqrt( 2.L ) / 2, k = 1 - 1 / ( 2 * g );
+    // The ARS222 primary ignores the initial implicit rate and final explicit
+    // rate. A first-order embedding consumes both, so adaptation must retain them.
+    const runge_kutta::imex_butcher_table pair(
+        { { { 0, 0, 0 }, { g, 0, 0 }, { k, 1 - k, 0 } }, { k, 1 - k, 0 }, 2, {}, { .5L, 0, .5L }, 1 },
+        { { { 0, 0, 0 }, { 0, g, 0 }, { 0, 1 - g, g } }, { 0, 1 - g, g }, 2, {}, { .5L, 0, .5L }, 1 }, 2, 1
+    );
+    using no_rate         = stage_problem<imex_linear_equation>;
+    using no_rate_problem = imex_problem<autonomous_rate, no_rate>;
+    using no_rate_step    = imex_step<no_rate_problem, imex_error_capture>;
+    auto ops              = std::make_shared<operations_type>( 1 );
+    auto problem          = std::make_shared<no_rate_problem>(
+        std::make_shared<autonomous_rate>( autonomous_rate{ ops } ),
+        std::make_shared<no_rate>( ops, imex_linear_equation{ -1.25 } )
+    );
+    vector_wrap_type initial( *ops ), out( *ops );
+    initial.start_use();
+    out.start_use();
+    ops->assign_scalar( 1., *initial );
+    auto control     = std::make_shared<imex_error_capture>( ops, .1 );
+    control->enabled = false;
+    no_rate_step fixed( ops, problem, control, newton_types<no_rate>::make_solver( ops ), pair );
+    fixed.apply( *initial, *out );
+    require(
+        fixed.get_status() == single_step_status::converged && problem->partitions->explicit_part->calls == 2,
+        "Fixed IMEX allocated/evaluated embedding-only rates"
+    );
+    fixed.finalize( adaptation_status::accepted, .1, *out );
+    control->enabled = true;
+    bool rejected    = false;
+    try
+    {
+        no_rate_step adaptive( ops, problem, control, newton_types<no_rate>::make_solver( ops ), pair );
+    }
+    catch ( const std::invalid_argument & )
+    {
+        rejected = true;
+    }
+    require( rejected, "IMEX embedding silently skipped a required implicit rate" );
+
+    auto complete   = make_problem( ops );
+    auto capture    = std::make_shared<imex_error_capture>( ops, .1 );
+    using step_type = imex_step<problem_type, imex_error_capture>;
+    step_type adaptive( ops, complete, capture, types::make_solver( ops ), pair );
+    adaptive.apply( *initial, *out );
+    require(
+        adaptive.get_status() == single_step_status::converged && capture->exponent == 2 &&
+            complete->partitions->explicit_part->calls == 3 && complete->partitions->implicit_part->calls == 1,
+        "IMEX did not compute its embedding-only endpoint/zero-diagonal rates"
+    );
+    adaptive.finalize( adaptation_status::accepted, .1, *out );
+
+    auto                                  ark = runge_kutta::make_imex_butcher_table( "IMEX_ARK324L2SA" );
+    const runge_kutta::imex_butcher_table unpaired( ark.explicit_table, ark.implicit_table, 3 );
+    auto                                  unavailable = make_problem( ops );
+    capture                                           = std::make_shared<imex_error_capture>( ops, .1 );
+    step_type strict( ops, unavailable, capture, types::make_solver( ops ), unpaired );
+    ops->assign_scalar( 77., *out );
+    strict.apply( *initial, *out );
+    require(
+        strict.get_status() == single_step_status::error_estimate_unavailable && capture->assessments == 0 &&
+            unavailable->partitions->explicit_part->calls == 0 && ops->get_value_at_point( 0, *out ) == 77,
+        "Partition embeddings were incorrectly treated as a validated combined estimate"
+    );
+}
+
+void test_adaptive_workspace()
+{
+    auto ops                   = std::make_shared<counting_operations>( 1 );
+    auto problem               = make_problem( ops );
+    auto solver                = types::make_solver( ops );
+    using step_type            = imex_step<problem_type, imex_error_capture>;
+    auto control               = std::make_shared<imex_error_capture>( ops, .1 );
+    control->enabled           = false;
+    unsigned int fixed_vectors = 0;
+    const auto   before        = ops->live;
+    {
+        step_type fixed( ops, problem, control, solver, step_type::params{ "IMEX_ARK324L2SA" } );
+        fixed_vectors = ops->live - before;
+    }
+    control->enabled = true;
+    step_type adaptive( ops, problem, control, solver, step_type::params{ "IMEX_ARK324L2SA" } );
+    require( ops->live - before == fixed_vectors + 1, "Adaptive IMEX did not allocate exactly one state-error vector" );
+    vector_wrap_type initial( *ops ), out( *ops );
+    initial.start_use();
+    out.start_use();
+    ops->assign_scalar( 1., *initial );
+    adaptive.apply( *initial, *out );
+    require( adaptive.get_status() == single_step_status::converged, "Adaptive workspace warmup failed" );
+    adaptive.finalize( adaptation_status::accepted, .1, *out );
+    const auto allocations = ops->allocations;
+    for ( int run = 0; run < 3; ++run )
+    {
+        adaptive.reset();
+        adaptive.apply( *initial, *out );
+        require(
+            adaptive.get_status() == single_step_status::converged && ops->allocations == allocations,
+            "Adaptive IMEX allocated vector workspace during restart or repeated solves"
+        );
+        adaptive.finalize( adaptation_status::accepted, .1, *out );
+    }
+    auto throwing           = std::make_shared<controlled_solver>( controlled_solver{ ops, solver } );
+    throwing->throw_binding = true;
+    const auto live         = ops->live;
+    bool       rejected     = false;
+    try
+    {
+        imex_step<problem_type, imex_error_capture, controlled_solver> invalid(
+            ops, problem, control, throwing, { "IMEX_ARK324L2SA" }
+        );
+    }
+    catch ( const std::runtime_error & )
+    {
+        rejected = true;
+    }
+    require( rejected && ops->live == live, "Failed adaptive construction leaked error/rate storage" );
+}
+
+void test_modified_adaptive_endpoint()
+{
+    using filter            = integration::time_step_adaptation_filter<operations_type>;
+    using controller        = observed_controller<filter>;
+    using step_type         = imex_step<problem_type, controller>;
+    auto ops                = std::make_shared<operations_type>( 1 );
+    auto problem            = make_problem( ops );
+    auto p                  = controller_parameters<filter>( 1e-5 );
+    p.controller            = "H211";
+    auto control            = std::make_shared<controller>( ops, p );
+    control->expected_order = 3;
+    step_type        step( ops, problem, control, types::make_solver( ops ), step_type::params{ "IMEX_ARK324L2SA" } );
+    vector_wrap_type initial( *ops ), out( *ops ), reference( *ops );
+    initial.start_use();
+    out.start_use();
+    reference.start_use();
+    ops->assign_scalar( 1., *initial );
+    step.apply( *initial, *out );
+    require( step.get_status() == single_step_status::converged, "Adaptive shortened-step setup failed" );
+    const auto shortened = step.get_dt() / 2;
+    ops->assign_scalar( 2., *initial );
+    step.finalize( adaptation_status::accepted_modified, shortened, *initial );
+    p.initial_step                = control->get_dt();
+    auto fresh_control            = std::make_shared<controller>( ops, p );
+    fresh_control->expected_order = 3;
+    step_type fresh(
+        ops, make_problem( ops ), fresh_control, types::make_solver( ops ), step_type::params{ "IMEX_ARK324L2SA" }
+    );
+    step.set_time( shortened );
+    fresh.set_time( shortened );
+    step.apply( *initial, *out );
+    fresh.apply( *initial, *reference );
+    require(
+        step.get_status() == single_step_status::converged && fresh.get_status() == single_step_status::converged &&
+            step.get_dt() == fresh.get_dt() &&
+            std::abs( ops->get_value_at_point( 0, *out ) - ops->get_value_at_point( 0, *reference ) ) < 1e-13,
+        "Modified IMEX endpoint retained invalid controller/rate history"
+    );
+    step.finalize( adaptation_status::accepted, shortened + step.get_dt(), *out );
+    fresh.finalize( adaptation_status::accepted, shortened + fresh.get_dt(), *reference );
+}
+
 int main()
 try
 {
@@ -483,6 +694,10 @@ try
     test_optional_interfaces();
     test_ownership_and_lifecycle();
     test_modified_endpoint_and_backward();
+    test_adaptive_recovery();
+    test_embedding_capabilities();
+    test_adaptive_workspace();
+    test_modified_adaptive_endpoint();
     std::cout << "Fixed IMEX bounded failures, optional rates, commitment, ownership and workspace reuse: PASS\n";
 }
 catch ( const std::exception &error )

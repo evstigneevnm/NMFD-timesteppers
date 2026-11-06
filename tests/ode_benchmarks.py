@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run the DIRK system benchmarks with reference comparisons and plots."""
+"""Build and run DIRK/IMEX system benchmarks with reference comparisons and plots."""
 
 import argparse
 from datetime import datetime
@@ -15,9 +15,22 @@ import time
 HERE = Path(__file__).resolve().parent
 MODULE = HERE.parent
 CONTROLLERS = ("matlab", "scipy", "I", "H211", "PC", "PID", "H312", "PPID", "H321")
-METHODS = ("SDIRK2(1)2", "SDIRK3(1)3")
+DEFAULT_METHODS = ("SDIRK2(1)2", "SDIRK3(1)3", "IMEX_ARK324L2SA")
+FIXED_IMEX_METHODS = ("IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233")
+METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS
 SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "coupled_mass", "state_mass",
            "time_mass", "coupled_dae", "moving_dae", "stokes_dae", "time_coefficient", "stiff_tracking")
+IMEX_SPLITS = {
+    "lorenz": "Explicit nonlinear coupling/forcing; implicit linear terms.",
+    "rossler": "Explicit z*x; implicit remaining linear/affine terms.",
+    "vdp": "Explicit (v,-x); implicit (0,mu*(1-x^2)*v).",
+    "vdp_stiff": "Explicit (v,-x); implicit (0,mu*(1-x^2)*v).",
+    "coupled_mass": "Explicit off-diagonal physical RHS; implicit diagonal RHS; shared coupled mass.",
+    "state_mass": "Physical RHS split 1:3, explicit:implicit; shared state-dependent mass.",
+    "time_mass": "Physical RHS split 1:3, explicit:implicit; shared time-dependent mass.",
+    "time_coefficient": "Time-dependent RHS split 1:3, explicit:implicit.",
+    "stiff_tracking": "Explicit kappa*sin(t)+cos(t); implicit -kappa*u.",
+}
 BUILD_ENVIRONMENT = ("CXX", "CXXFLAGS", "CPPFLAGS", "CPPSTD", "OPENMP_FLAGS", "NVCC", "NVCCFLAGS",
                      "CUDA_ROOT", "CUDA_ARCH", "SCFD_ROOT", "NMFD_OPERATIONS_ROOT", "NMFD_NEWTON_ROOT",
                      "NMFD_LINSOLVERS_ROOT", "JSON_INCLUDE")
@@ -102,8 +115,8 @@ def arguments(argv=None):
     parser.add_argument("--max-step", type=positive, default=.05)
     parser.add_argument("--max-steps", type=int, default=2_000_000)
     parser.add_argument("--max-relative-error", type=positive, default=.01)
-    parser.add_argument("--methods", choices=METHODS, nargs="+", default=list(METHODS))
-    parser.add_argument("--controllers", choices=CONTROLLERS, nargs="+", default=list(CONTROLLERS))
+    parser.add_argument("--methods", choices=METHODS, nargs="+", default=list(DEFAULT_METHODS))
+    parser.add_argument("--controllers", choices=(*CONTROLLERS, "constant"), nargs="+", default=list(CONTROLLERS))
     parser.add_argument("--backend", choices=("cpu", "cpu_omp", "cuda"), default="cpu")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--timeout", type=positive, default=300)
@@ -114,6 +127,8 @@ def arguments(argv=None):
         parser.error("Invalid step bounds, step budget, or thread count")
     if args.initial is not None and len(args.systems) != 1:
         parser.error("--initial requires exactly one --system")
+    if "constant" in args.controllers and not args.min_step <= args.step <= args.max_step:
+        parser.error("Constant --step must lie within --min-step and --max-step")
     return args
 
 
@@ -133,15 +148,25 @@ def configuration(args, system):
         initial = definition["initial"] if args.initial is None else args.initial
     if len(initial) != len(definition["labels"]) or not all(math.isfinite(value) for value in initial):
         raise ValueError("Invalid initial-state dimension or value")
+    methods = [method for method in dict.fromkeys(args.methods)
+               if not method.startswith("IMEX_") or system in IMEX_SPLITS]
+    if not methods:
+        raise ValueError(f"{system}: IMEX benchmarks do not support singular-mass DAEs; select a DIRK method")
+    if any(method in FIXED_IMEX_METHODS for method in methods) and "constant" not in args.controllers:
+        raise ValueError("Fixed IMEX tables require --controllers constant (no combined embedded estimator)")
+    cases = [dict(method=method, controller=controller,
+                  filename=method.replace("(", "_").replace(")", "_") + "_" + controller + ".dat")
+             for method in methods for controller in dict.fromkeys(args.controllers)
+             if method not in FIXED_IMEX_METHODS or controller == "constant"]
     return dict(system=system, backend=args.backend, start_time=start, end_time=end,
                   initial_state=initial, parameters=definition["parameters"], labels=definition["labels"],
                   maximum_steps=args.max_steps, max_relative_error=args.max_relative_error,
                   newton_absolute_tolerance=2e-10, newton_relative_tolerance=1e-12,
                   adaptation=dict(relative_tolerance=args.rtol, absolute_tolerance=args.atol,
                                   initial_step=args.step, minimum_step=args.min_step, maximum_step=args.max_step),
-                  cases=[dict(method=method, controller=controller,
-                              filename=method.replace("(", "_").replace(")", "_") + "_" + controller + ".dat")
-                         for method in dict.fromkeys(args.methods) for controller in dict.fromkeys(args.controllers)])
+                  splitting=IMEX_SPLITS.get(system),
+                  skipped_methods=[method for method in dict.fromkeys(args.methods) if method not in methods],
+                  cases=cases)
 
 
 def write_if_changed(path, text):
@@ -180,7 +205,8 @@ def build_and_assemble(args, configurations):
             launch.extend([option, str(config["adaptation"][key])])
         if not system_definition(config["system"])["exact"]:
             launch.extend(["--initial", *map(str, config["initial_state"])])
-        launch.extend(["--methods", *args.methods, "--controllers", *args.controllers])
+        launch.extend(["--methods", *dict.fromkeys(case["method"] for case in config["cases"]),
+                       "--controllers", *dict.fromkeys(case["controller"] for case in config["cases"])])
         launcher = system_dir / "run.sh"
         write_if_changed(launcher, "#!/usr/bin/env bash\nset -euo pipefail\nexec " + shlex.join(launch) + ' "$@"\n')
         if not os.access(launcher, os.X_OK):
@@ -233,6 +259,11 @@ def read_trajectory(path, config, case):
     for key in ("method", "controller"):
         if metadata[key] != case[key]:
             raise ValueError(f"Unexpected {key}")
+    scheme = "imex" if case["method"].startswith("IMEX_") else "dirk"
+    if metadata.get("scheme", "dirk") != scheme:
+        raise ValueError("Unexpected integration scheme")
+    if scheme == "imex" and (not config.get("splitting") or metadata.get("splitting") != config["splitting"]):
+        raise ValueError("Inconsistent IMEX splitting metadata")
     if "backend" in config and metadata["backend"] != config["backend"]:
         raise ValueError("Unexpected backend")
     if (report["rows"] != len(data) or report["accepted_steps"] != len(data) - 1
@@ -374,6 +405,9 @@ def main(argv=None):
     if args.plot_only:
         return plot(args.plot_only.resolve())
     configurations = [configuration(args, system) for system in args.systems]
+    for config in configurations:
+        if config["skipped_methods"]:
+            print(f"{config['system']}: DIRK only (singular mass); skipped {', '.join(config['skipped_methods'])}")
     if not args.build_only:
         check_runtime_dependencies()
     executable = build_and_assemble(args, configurations)

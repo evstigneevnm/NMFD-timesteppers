@@ -35,6 +35,21 @@ struct has_rate_evaluation<
 {
 };
 
+template <class Adaptation, class Vector, class T, class = void>
+struct has_embedded_assessment : std::false_type
+{
+};
+
+template <class Adaptation, class Vector, class T>
+struct has_embedded_assessment<
+    Adaptation, Vector, T,
+    std::void_t<decltype( std::declval<Adaptation &>().assess(
+        std::declval<T>(), std::declval<T>(), std::declval<const Vector &>(), std::declval<const Vector &>(),
+        std::declval<T &>(), std::declval<unsigned int>(), std::declval<const Vector *>()
+    ) )>> : std::true_type
+{
+};
+
 template <class Problem, class Vector, class T, class = void>
 struct has_implicit_stage_interface : std::false_type
 {

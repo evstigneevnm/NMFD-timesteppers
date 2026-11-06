@@ -45,20 +45,7 @@ struct implicit_dense_storage<VectorOperations, true>
 
 using nmfd::time_steppers::detail::has_rate_evaluation;
 
-template <class Adaptation, class Vector, class T, class = void>
-struct has_embedded_assessment : std::false_type
-{
-};
-
-template <class Adaptation, class Vector, class T>
-struct has_embedded_assessment<
-    Adaptation, Vector, T,
-    std::void_t<decltype( std::declval<Adaptation &>().assess(
-        std::declval<T>(), std::declval<T>(), std::declval<const Vector &>(), std::declval<const Vector &>(),
-        std::declval<T &>(), std::declval<unsigned int>(), std::declval<const Vector *>()
-    ) )>> : std::true_type
-{
-};
+using nmfd::time_steppers::detail::has_embedded_assessment;
 
 using nmfd::time_steppers::detail::has_implicit_stage_interface;
 }

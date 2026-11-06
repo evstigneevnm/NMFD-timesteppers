@@ -42,7 +42,9 @@ class BenchmarkAssemblyTests(unittest.TestCase):
         args = self.args()
         configs = {name: runner.configuration(args, name) for name in args.systems}
         self.assertEqual(len(configs), 12)
-        self.assertTrue(all(len(config["cases"]) == 18 for config in configs.values()))
+        for name, config in configs.items():
+            self.assertEqual(len(config["cases"]), 27 if name in runner.IMEX_SPLITS else 18)
+        self.assertEqual(sum(len(config["cases"]) for config in configs.values()), 297)
         self.assertEqual(configs["lorenz"]["end_time"], 50)
         self.assertEqual(configs["rossler"]["end_time"], 50)
         self.assertEqual(configs["vdp"]["end_time"], 20)
@@ -52,6 +54,37 @@ class BenchmarkAssemblyTests(unittest.TestCase):
         self.assertEqual(configs["lorenz"]["adaptation"], dict(
             relative_tolerance=1e-5, absolute_tolerance=1e-7,
             initial_step=.001, minimum_step=1e-8, maximum_step=.05))
+
+    def test_imex_methods_and_controllers_are_selected_without_silent_fallback(self):
+        args = self.args("--systems", "lorenz", "state_mass", "--methods", "IMEX_ARK324L2SA")
+        for system in args.systems:
+            config = runner.configuration(args, system)
+            self.assertEqual(len(config["cases"]), 9)
+            self.assertTrue(config["splitting"])
+            self.assertEqual(config["skipped_methods"], [])
+        for method in runner.FIXED_IMEX_METHODS:
+            args = self.args("--system", "coupled_mass", "--methods", method)
+            with self.assertRaisesRegex(ValueError, "controllers constant"):
+                runner.configuration(args, "coupled_mass")
+            args = self.args("--system", "coupled_mass", "--methods", method, "IMEX_ARK324L2SA",
+                             "--controllers", "constant", "scipy")
+            cases = runner.configuration(args, "coupled_mass")["cases"]
+            self.assertEqual([(case["method"], case["controller"]) for case in cases],
+                             [(method, "constant"), ("IMEX_ARK324L2SA", "constant"), ("IMEX_ARK324L2SA", "scipy")])
+
+    def test_singular_mass_imex_is_explicitly_excluded(self):
+        args = self.args("--system", "stokes_dae")
+        config = runner.configuration(args, "stokes_dae")
+        self.assertEqual(config["skipped_methods"], ["IMEX_ARK324L2SA"])
+        self.assertTrue(all(not case["method"].startswith("IMEX_") for case in config["cases"]))
+        args = self.args("--system", "stokes_dae", "--methods", "IMEX_ARK324L2SA")
+        with self.assertRaisesRegex(ValueError, "singular-mass"):
+            runner.configuration(args, "stokes_dae")
+
+    def test_constant_step_respects_configured_bounds(self):
+        for step in ("1e-10", "1"):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.args("--controllers", "constant", "--step", step)
 
     def test_build_only_forces_make_without_scientific_packages_or_execution(self):
         with mock.patch.object(runner.subprocess, "run", side_effect=self.fake_make), \
@@ -100,6 +133,14 @@ class BenchmarkAssemblyTests(unittest.TestCase):
         self.assertNotEqual(before, options.read_bytes())
         self.assertEqual(json.loads(options.read_text())["environment"]["CXXFLAGS"], "-O0 -g -DBENCHMARK_SETTINGS_TEST")
         self.assertIn(f"BENCHMARK_CONFIG={options}", self.commands[-1])
+
+    def test_dae_launcher_preserves_its_filtered_method_selection(self):
+        args = self.args("--system", "stokes_dae")
+        with mock.patch.object(runner.subprocess, "run", side_effect=self.fake_make):
+            runner.build_and_assemble(args, [runner.configuration(args, "stokes_dae")])
+        launcher = (self.root / "stokes_dae/run.sh").read_text()
+        self.assertNotIn("IMEX_", launcher)
+        self.assertIn("SDIRK2", launcher)
 
     def test_failed_build_does_not_assemble_or_execute(self):
         args = self.args("-B")
@@ -225,6 +266,21 @@ class BenchmarkDiagnosticsTests(unittest.TestCase):
         data, report = runner.read_trajectory(self.path, self.config, self.case)
         self.np.testing.assert_array_equal(data, self.data)
         self.assertEqual(report["accepted_steps"], 2)
+
+    def test_imex_trajectory_requires_correct_scheme_and_partition_metadata(self):
+        self.case["method"] = "IMEX_ARK324L2SA"
+        self.config["splitting"] = runner.IMEX_SPLITS["coupled_mass"]
+        self.metadata.update(method=self.case["method"], scheme="imex", splitting=self.config["splitting"])
+        self.save()
+        runner.read_trajectory(self.path, self.config, self.case)
+        self.metadata["splitting"] = "Wrong partition"
+        self.save()
+        with self.assertRaisesRegex(ValueError, "splitting"):
+            runner.read_trajectory(self.path, self.config, self.case)
+        self.metadata["scheme"] = "dirk"
+        self.save()
+        with self.assertRaisesRegex(ValueError, "scheme"):
+            runner.read_trajectory(self.path, self.config, self.case)
 
     def test_failed_run_is_rejected(self):
         self.report["status"] = "failed"

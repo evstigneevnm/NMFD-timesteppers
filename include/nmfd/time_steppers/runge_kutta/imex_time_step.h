@@ -73,8 +73,11 @@ public:
               adaptation ? std::move( adaptation ) : throw std::invalid_argument( "IMEX requires time adaptation" )
           ),
           solver_( solver ? std::move( solver ) : throw std::invalid_argument( "IMEX requires a nonlinear solver" ) ),
-          params_( p ), table_( std::move( table.explicit_table ), std::move( table.implicit_table ), table.order ),
-          work_( *operations_ )
+          params_( p ),
+          table_(
+              std::move( table.explicit_table ), std::move( table.implicit_table ), table.order, table.embedded_order()
+          ),
+          work_( *operations_ ), error_( *operations_ )
     {
         if ( !partitions_ || !partitions_->explicit_part || !partitions_->implicit_part )
             throw std::invalid_argument( "IMEX requires both partition operators" );
@@ -83,6 +86,9 @@ public:
         nmfd::time_steppers::detail::balanced_affine_shift( scalar_type( 0 ), p.reference_time );
         if constexpr ( DenseOutput )
             throw std::invalid_argument( "IMEX requires a validated combined dense extension" );
+        if constexpr ( nmfd::time_steppers::detail::has_embedded_assessment<
+                           TimeStepAdaptation, vector_type, scalar_type>::value )
+            estimate_error_ = adaptation_->requires_error_estimate() && table_.is_embedded();
         const auto &e     = table_.explicit_table;
         const auto &i     = table_.implicit_table;
         stiffly_accurate_ = true;
@@ -95,6 +101,11 @@ public:
                 throw std::invalid_argument( "Consumed zero-diagonal implicit stages require evaluate_rate()" );
         work_.init();
         work_.start_use();
+        if ( estimate_error_ )
+        {
+            error_.init();
+            error_.start_use();
+        }
         allocate_rates( e, explicit_rates_ );
         allocate_rates( i, implicit_rates_ );
         solver_->set_nonlinear_operator( partitions_->implicit_part );
@@ -149,7 +160,7 @@ public:
     {
         require_finalized();
         attempts_ = 0;
-        if ( adaptation_->requires_error_estimate() )
+        if ( adaptation_->requires_error_estimate() && !estimate_error_ )
         {
             status_ = single_step_status::error_estimate_unavailable;
             return;
@@ -184,7 +195,7 @@ public:
                 continue;
             }
             scalar_type next_dt  = proposed;
-            const auto  decision = adaptation_->assess( time_, dt_, in, *work_, next_dt );
+            const auto  decision = assess( in, next_dt );
             if ( decision == adaptation_status::accepted )
             {
                 operations_->assign( *work_, out );
@@ -222,12 +233,12 @@ private:
     std::shared_ptr<NonlinearSolver>    solver_;
     params                              params_;
     imex_butcher_table                  table_;
-    vector_wrap_type                    work_;
+    vector_wrap_type                    work_, error_;
     std::vector<vector_wrap_type>       explicit_rates_, implicit_rates_;
     scalar_type                         time_ = 0, target_ = 1, dt_ = 0;
-    unsigned int                        attempts_         = 0;
-    bool                                stiffly_accurate_ = false, initialized_ = false, pending_ = false;
-    single_step_status                  status_ = single_step_status::idle;
+    unsigned int                        attempts_ = 0;
+    bool               stiffly_accurate_ = false, estimate_error_ = false, initialized_ = false, pending_ = false;
+    single_step_status status_ = single_step_status::idle;
 
     void require_finalized() const
     {
@@ -236,7 +247,7 @@ private:
     }
     bool needs_rate( const butcher_table &table, std::size_t stage ) const
     {
-        if ( !stiffly_accurate_ && table.b( stage ) != 0 )
+        if ( ( !stiffly_accurate_ && table.b( stage ) != 0 ) || ( estimate_error_ && table.error_b( stage ) != 0 ) )
             return true;
         for ( std::size_t j = stage + 1; j < table.size(); ++j )
             if ( table.a( j, stage ) != 0 )
@@ -262,6 +273,14 @@ private:
             return true;
         status_ = single_step_status::failed_nonfinite;
         return false;
+    }
+    adaptation_status assess( const vector_type &in, scalar_type &next_dt )
+    {
+        if constexpr ( nmfd::time_steppers::detail::has_embedded_assessment<
+                           TimeStepAdaptation, vector_type, scalar_type>::value )
+            if ( estimate_error_ )
+                return adaptation_->assess( time_, dt_, in, *work_, next_dt, table_.error_order(), &*error_ );
+        return adaptation_->assess( time_, dt_, in, *work_, next_dt );
     }
     template <class Partition>
     bool evaluate_rate( Partition &partition, const vector_type &state, vector_type &rate )
@@ -351,7 +370,23 @@ private:
                     operations_->add_lin_comb( dt_ * scalar_type( i.b( j ) ), *implicit_rates_[j], *work_ );
             }
         }
-        return valid( *work_ );
+        if ( !valid( *work_ ) )
+            return false;
+        if ( estimate_error_ )
+        {
+            // Combine signed state defects before applying the controller's norm/scaling.
+            operations_->assign_scalar( scalar_type( 0 ), *error_ );
+            for ( std::size_t j = 0; j < e.size(); ++j )
+            {
+                if ( e.error_b( j ) != 0 )
+                    operations_->add_lin_comb( dt_ * scalar_type( e.error_b( j ) ), *explicit_rates_[j], *error_ );
+                if ( i.error_b( j ) != 0 )
+                    operations_->add_lin_comb( dt_ * scalar_type( i.error_b( j ) ), *implicit_rates_[j], *error_ );
+            }
+            if ( !valid( *error_ ) )
+                return false;
+        }
+        return true;
     }
 };
 }

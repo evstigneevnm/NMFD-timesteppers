@@ -45,8 +45,14 @@ try
     {
         const char  *name;
         std::size_t  stored_stages;
-        unsigned int order;
-    } pairs[] = { { "IMEX_EULER", 2, 1 }, { "IMEX_HEUN_TR2", 2, 2 }, { "IMEX_ARS233", 3, 3 }, { "IMEX_ARS222", 3, 2 } };
+        unsigned int order, embedded_order;
+    } pairs[] = {
+        { "IMEX_EULER", 2, 1, 0 },
+        { "IMEX_HEUN_TR2", 2, 2, 0 },
+        { "IMEX_ARS233", 3, 3, 0 },
+        { "IMEX_ARS222", 3, 2, 0 },
+        { "IMEX_ARK324L2SA", 4, 3, 2 }
+    };
 
     for ( const auto &method : pairs )
     {
@@ -55,45 +61,91 @@ try
         const auto &e    = pair.explicit_table;
         const auto &i    = pair.implicit_table;
         require(
-            pair.order == method.order && e.size() == method.stored_stages && i.size() == method.stored_stages,
+            pair.order == method.order && e.size() == method.stored_stages && i.size() == method.stored_stages &&
+                pair.embedded_order() == method.embedded_order &&
+                pair.error_order() == ( method.embedded_order ? method.embedded_order + 1 : 0 ),
             std::string( name ) + ": name/metadata mismatch"
         );
         table_tests::check_order( e, std::string( name ) + " explicit" );
         table_tests::check_order( i, std::string( name ) + " implicit" );
-        // All colored rooted-tree conditions through order three.
-        for ( const auto *root : { &e, &i } )
+        // Both primary and embedded weights must satisfy the colored-tree conditions.
+        for ( const bool embedded : { false, true } )
         {
-            for ( const auto *child : { &e, &i } )
+            if ( embedded && !pair.is_embedded() )
+                continue;
+            if ( embedded )
             {
-                long double bc = 0, bcc = 0;
-                for ( std::size_t j = 0; j < e.size(); ++j )
+                table_tests::check_order( e, std::string( name ) + " explicit embedding", true );
+                table_tests::check_order( i, std::string( name ) + " implicit embedding", true );
+            }
+            const auto order  = embedded ? pair.embedded_order() : pair.order;
+            const auto weight = [embedded]( const butcher_table &table, std::size_t j ) {
+                return embedded ? table.embedded_b( j ) : table.b( j );
+            };
+            for ( const auto *root : { &e, &i } )
+            {
+                for ( const auto *child : { &e, &i } )
                 {
-                    bc += root->b( j ) * child->c( j );
-                    bcc += root->b( j ) * child->c( j ) * child->c( j );
-                }
-                if ( pair.order >= 2 )
-                {
-                    require( std::abs( bc - .5L ) < 1e-14L, "IMEX coupling order two" );
-                }
-                if ( pair.order >= 3 )
-                {
-                    require( std::abs( bcc - 1.L / 3 ) < 1e-14L, "IMEX bush order three" );
-                    for ( const auto *grandchild : { &e, &i } )
+                    long double bc = 0, bcc = 0;
+                    for ( std::size_t j = 0; j < e.size(); ++j )
                     {
-                        long double bac = 0;
-                        for ( std::size_t j = 0; j < e.size(); ++j )
+                        bc += weight( *root, j ) * child->c( j );
+                        bcc += weight( *root, j ) * child->c( j ) * child->c( j );
+                    }
+                    if ( order >= 2 )
+                    {
+                        require( std::abs( bc - .5L ) < 1e-14L, "IMEX coupling order two" );
+                    }
+                    if ( order >= 3 )
+                    {
+                        require( std::abs( bcc - 1.L / 3 ) < 1e-14L, "IMEX bush order three" );
+                        for ( const auto *grandchild : { &e, &i } )
                         {
-                            for ( std::size_t k = 0; k < e.size(); ++k )
+                            long double bac = 0;
+                            for ( std::size_t j = 0; j < e.size(); ++j )
                             {
-                                bac += root->b( j ) * child->a( j, k ) * grandchild->c( k );
+                                for ( std::size_t k = 0; k < e.size(); ++k )
+                                {
+                                    bac += weight( *root, j ) * child->a( j, k ) * grandchild->c( k );
+                                }
                             }
+                            require( std::abs( bac - 1.L / 6 ) < 1e-14L, "IMEX chain order three" );
                         }
-                        require( std::abs( bac - 1.L / 6 ) < 1e-14L, "IMEX chain order three" );
                     }
                 }
             }
         }
     }
+    const auto               embedded_pair = make_imex_butcher_table( "IMEX_ARK324L2SA" );
+    const imex_butcher_table unpaired( embedded_pair.explicit_table, embedded_pair.implicit_table, 3 );
+    require(
+        !unpaired.is_embedded() && unpaired.error_order() == 0,
+        "Independent partition embeddings silently enabled an IMEX estimator"
+    );
+    for ( const unsigned int order : { 1u, 3u } )
+    {
+        bool refused = false;
+        try
+        {
+            imex_butcher_table bad( embedded_pair.explicit_table, embedded_pair.implicit_table, 3, order );
+        }
+        catch ( const std::invalid_argument & )
+        {
+            refused = true;
+        }
+        require( refused, "Invalid combined embedding order was accepted" );
+    }
+    bool missing_embedding = false;
+    try
+    {
+        const auto         fixed = make_imex_butcher_table( "IMEX_HEUN_TR2" );
+        imex_butcher_table bad( fixed.explicit_table, fixed.implicit_table, 2, 1 );
+    }
+    catch ( const std::invalid_argument & )
+    {
+        missing_embedding = true;
+    }
+    require( missing_embedding, "IMEX accepted missing partition embeddings" );
     bool rejected = false;
     try
     {

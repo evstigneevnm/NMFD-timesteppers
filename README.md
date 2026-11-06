@@ -84,7 +84,8 @@ Table names:
 - `SDIRK2(1)2`, `ESDIRK2(1)3`, and `SDIRK3(1)3` use `p(q)s`: primary
   order, embedded order, total stage count. `IE`, `IM`, and `CN` are unchanged.
 - IMEX names are `IMEX_EULER`, `IMEX_HEUN_TR2` (Heun plus trapezoidal),
-  `IMEX_ARS233`, and `IMEX_ARS222`. ARS digits count implicit stages, explicit
+  `IMEX_ARS233`, `IMEX_ARS222`, and the embedded `IMEX_ARK324L2SA` pair.
+  ARS digits count implicit stages, explicit
   stages, and combined order as in the original paper, not padded table dimensions.
 The previous names are retained only by the frozen legacy implementation.
 
@@ -259,7 +260,7 @@ solve. Replace one-argument implicit setters with `set_affine_shift(a,b)` and
 apply both coefficients consistently to differential residual/Jacobian rows.
 Integrator, controller, commit and nonlinear-solver interfaces are unchanged.
 
-`runge_kutta/imex_operator.h` provides a shared bundle for future IMEX execution:
+`runge_kutta/imex_operator.h` provides a shared bundle for IMEX execution:
 
 ```cpp
 using imex_operator_type = runge_kutta::imex_operator<explicit_type, implicit_type>;
@@ -272,9 +273,9 @@ Its `implicit_part` supplies the shifted residual/Jacobian and optionally
 forcing. Retain shared model data without a back-pointer to the bundle/application;
 bind solvers once at assembly.
 
-## Fixed-Step IMEX RK
+## IMEX RK
 
-`runge_kutta/imex_time_step.h` executes the four existing IMEX tables through
+`runge_kutta/imex_time_step.h` executes the fixed IMEX tables and `IMEX_ARK324L2SA` through
 the ordinary stepper/integrator/controller interfaces:
 
 ```cpp
@@ -306,8 +307,24 @@ Workspace is reused, and rates are rebuilt after rejection, reset or modified en
 Failed rates/Newton stages follow bounded rejection without assessing or publishing
 an invalid candidate; backend/configuration exceptions propagate.
 
-This stage has no validated combined embedded estimator or continuous extension.
-An error-requiring controller reports `error_estimate_unavailable` before stage work.
+`IMEX_ARK324L2SA` adds the Kennedy-Carpenter ARK3(2)4L[2]SA pair, using the
+existing implicit table and the corresponding [SUNDIALS explicit coefficients](https://github.com/LLNL/sundials/blob/main/src/arkode/arkode_butcher_erk.def).
+Its combined state error is
+`h*sum((bE-bhatE)*kE+(bI-bhatI)*kI)`, formed before the controller's norm/scaling.
+The primary order is three, the embedding order two, and the controller exponent
+three. MATLAB, SciPy and all digital-filter controllers use their existing interfaces.
+Only error-requiring configurations allocate the extra error vector and any
+embedding-only rates. Fixed-step configurations retain their original storage.
+
+Combined embedding metadata is explicit: the optional fourth argument of
+`imex_butcher_table(e,i,order,embedded_order)` enables a validated paired estimate.
+Separate partition embeddings do not automatically certify a combined one.
+Custom pairs must satisfy the colored order conditions; tests cover the published
+pair's primary and embedded coupling conditions. Old three-argument construction
+is unchanged. An error-requiring controller without a paired estimate reports
+`error_estimate_unavailable` before stage work.
+
+There is no validated combined continuous extension yet.
 `DenseOutput=true` is rejected during construction; no dense view is exposed.
 Fixed-step and error-free merit controllers retain their existing acceptance contracts.
 
@@ -315,7 +332,11 @@ Fixed-step and error-free merit controllers retain their existing acceptance con
 `test_implicit_imex_lifecycle.cpp` cover limiting/mixed orders, nonlinear and timed
 splits, stiff tracking, mass Jacobians/solves, rollback, ownership and workspace reuse.
 `test_implicit_imex_backend.cpp` runs matrix-free Newton/GMRES on 8192 unknowns
-with vector-sized host transfers blocked. Parent CI covers GCC/Clang CPU/OpenMP,
+with vector-sized host transfers blocked, including adaptive runs.
+`test_implicit_imex_adaptive.cpp` checks combined primary/embedded orders, error
+coefficients, controller refinement, stiff tracking, backward integration and restart.
+Mass and lifecycle tests also cover adaptive recovery, modified endpoints and
+error-workspace reuse. Parent CI covers GCC/Clang CPU/OpenMP,
 sanitizers and capability-gated CUDA/HIP.
 
 ```sh
@@ -681,6 +702,15 @@ bash build/ode_benchmarks/lorenz/run.sh
 # Optional backends and controller selection.
 bash source/contrib/nmfd-timesteppers/tests/run_all.sh --backend cpu_omp --threads 2
 bash source/contrib/nmfd-timesteppers/tests/run_all.sh --backend cuda --controllers H211 PID H321
+
+# Compare adaptive IMEX with DIRK on the same equations and independent references.
+bash source/contrib/nmfd-timesteppers/tests/run_all.sh \
+  --systems lorenz rossler vdp vdp_stiff coupled_mass state_mass time_mass time_coefficient stiff_tracking \
+  --methods 'SDIRK2(1)2' IMEX_ARK324L2SA --controllers scipy
+
+# The four non-embedded IMEX tables use constant stepping (--step sets h).
+bash source/contrib/nmfd-timesteppers/tests/run_all.sh --system coupled_mass \
+  --methods IMEX_EULER IMEX_HEUN_TR2 IMEX_ARS222 IMEX_ARS233 --controllers constant
 ```
 
 Normal invocations rebuild only stale binaries and leave unchanged assembly files
@@ -692,13 +722,25 @@ C++ dependencies. Normal execution additionally requires NumPy, SciPy, and
 Matplotlib. Set `PYTHON` explicitly when needed. Sibling dependency paths and
 compiler settings follow the standalone Makefile's existing environment variables.
 
-Defaults preserve the twelve-system matrix: Lorenz and Rossler to `t=50`, Van der
+Defaults retain the twelve-system matrix: Lorenz and Rossler to `t=50`, Van der
 Pol to `t=20` (`mu=1`) or `t=10` (`mu=1000`), and the manufactured mass/DAE and
 non-autonomous cases. Both SDIRK methods and all nine MATLAB/SciPy/filter settings
-are selected, giving 216 trajectories. Default adaptation is `rtol=1e-5`,
+are selected, with `IMEX_ARK324L2SA` added for the nine ODE/nonsingular-mass systems,
+giving 297 trajectories. Singular-mass DAE cases explicitly skip IMEX; an IMEX-only
+selection for them is rejected before building. Default adaptation is `rtol=1e-5`,
 `atol=1e-7`, initial step `0.001`, and step bounds `[1e-8,0.05]`; Newton tolerances
 remain `2e-10` absolute and `1e-12` relative. Use `--help` for interval and other
 overrides. Analytical initial states are computed consistently at `--start`.
+
+IMEX splits preserve the original full equations and parameters. Lorenz and Rossler
+use explicit nonlinear coupling and implicit linear terms; Van der Pol keeps its
+stiff damping implicit. Stiff tracking treats forcing explicitly and decay implicitly.
+Coupled mass splits off-diagonal/diagonal physical RHS terms; scalar mass and
+time-coefficient cases use a 1:3 explicit/implicit RHS split. Both rates solve the
+same problem-owned mass system. Configurations and trajectory metadata record
+the split; reports and plots compare the full state, not individual partitions.
+`test_implicit_imex_benchmarks.cpp` checks rate sums against the original equations
+and finite-differences every shifted implicit Jacobian, including mass derivatives.
 
 Lorenz/Rossler accuracy is checked over the first two time units; later chaotic
 divergence is plotted, not treated as an integration failure. Other systems use

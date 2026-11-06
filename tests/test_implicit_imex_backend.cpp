@@ -1,5 +1,6 @@
 #include "implicit_test_support.h"
 #include <nmfd/time_steppers/runge_kutta/imex_time_step.h>
+#include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
 
@@ -203,7 +204,43 @@ try
             );
         }
     }
-    std::cout << "Matrix-free IMEX with 8192 unknowns and blocked vector-sized host transfers: PASS\n";
+    using adaptive_controller = integration::time_step_adaptation_scipy<space_type>;
+    using adaptive_step       = runge_kutta::imex_time_step<space_type, problem, adaptive_controller, solver>;
+    linear::params lp;
+    lp.basis_size        = 4;
+    lp.batch_size        = 1;
+    lp.monitor.abs_tol   = 1e-12;
+    lp.monitor.rel_tol   = 1e-11;
+    auto             lin = std::make_shared<linear>( ops, nullptr, lp );
+    strategy::params np;
+    np.abs_tol  = 1e-10;
+    np.rel_tol  = 1e-12;
+    auto newton = std::make_shared<solver>(
+        ops, nullptr, std::make_shared<iteration>( ops, lin ), std::make_shared<strategy>( ops, nullptr, np )
+    );
+    adaptive_controller::params p;
+    p.relative_tolerance = 1e-7;
+    p.absolute_tolerance = 1e-9;
+    p.initial_step = p.maximum_step = .2;
+    auto adaptive                   = std::make_shared<adaptive_step>(
+        ops, assembly, std::make_shared<adaptive_controller>( ops, p ), newton,
+        adaptive_step::params{ "IMEX_ARK324L2SA" }
+    );
+    integration::time_integrator<space_type, adaptive_step> flow( ops, adaptive );
+    flow.set_time_interval( 0, .2 );
+    for ( int run = 0; run < 2; ++run )
+    {
+        flow.apply( *initial, *out );
+        require(
+            flow.get_status() == integration_status::completed && flow.get_steps() > 1,
+            "Backend-local adaptive IMEX did not control its error"
+        );
+        ops->add_mul_scalar( -std::exp( -.2 ), 1., *out );
+        require(
+            ops->norm_l2( *out ) / std::sqrt( double( ops->size() ) ) < 1e-6, "Backend-local adaptive IMEX accuracy"
+        );
+    }
+    std::cout << "Fixed/adaptive matrix-free IMEX, 8192 unknowns and blocked vector-sized host transfers: PASS\n";
 }
 catch ( const std::exception &error )
 {

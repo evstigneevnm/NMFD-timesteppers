@@ -1,7 +1,4 @@
-#include "implicit_lorenz_problem.h"
-#include "implicit_rossler_problem.h"
-#include "implicit_vdp_problem.h"
-#include "implicit_mass_dae_problems.h"
+#include "ode_benchmark_imex.h"
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -80,31 +77,83 @@ struct trajectory_writer
     }
 };
 
-template <class Equation, class Controller>
+struct benchmark_constant_controller : adaptation_type
+{
+    using adaptation_type::adaptation_type;
+    unsigned int error_rejections = 0, numerical_rejections = 0, commits = 0;
+    void         reset()
+    {
+        adaptation_type::reset();
+        numerical_rejections = commits = 0;
+    }
+    adaptation_status reject_step( double h )
+    {
+        ++numerical_rejections;
+        return adaptation_type::reject_step( h );
+    }
+    void update( adaptation_status outcome, double t, double h, const vector_type &state )
+    {
+        commits += outcome == adaptation_status::accepted || outcome == adaptation_status::accepted_modified;
+        adaptation_type::update( outcome, t, h, state );
+    }
+};
+
+template <class Equation, class Controller, bool IMEX = false>
 int integrate(
     const Equation &equation, const json &config, const std::string &path, const std::string &method,
     const std::string &controller
 )
 {
-    using problem_type    = stage_problem<Equation>;
-    using types           = newton_types<problem_type>;
-    using adaptation_type = observed_controller<Controller>;
-    using step_type =
-        runge_kutta::implicit_time_step<operations_type, problem_type, adaptation_type, typename types::solver_type>;
-    const auto                 &settings = config.at( "adaptation" );
-    typename Controller::params p;
-    p.relative_tolerance = settings.at( "relative_tolerance" ).get<double>();
-    p.absolute_tolerance = settings.at( "absolute_tolerance" ).get<double>();
-    p.initial_step       = settings.at( "initial_step" ).get<double>();
-    p.minimum_step       = settings.at( "minimum_step" ).get<double>();
-    p.maximum_step       = settings.at( "maximum_step" ).get<double>();
-    if constexpr ( std::is_same_v<Controller, integration::time_step_adaptation_filter<operations_type>> )
-        p.controller = controller;
-    auto ops        = std::make_shared<operations_type>( Equation::size );
-    auto adaptation = std::make_shared<adaptation_type>( ops, p );
-    auto problem    = std::make_shared<problem_type>( ops, equation );
-    auto solver     = types::make_solver( ops );
-    auto step = std::make_shared<step_type>( ops, problem, adaptation, solver, typename step_type::params{ method } );
+    using problem_type = std::conditional_t<IMEX, benchmark_implicit_partition<Equation>, stage_problem<Equation>>;
+    using types        = newton_types<problem_type>;
+    using control_type = std::conditional_t<
+        std::is_same_v<Controller, adaptation_type>, benchmark_constant_controller, observed_controller<Controller>>;
+    using flow_problem_type = std::conditional_t<IMEX, benchmark_imex_problem<Equation>, problem_type>;
+    using step_type         = std::conditional_t<
+                IMEX,
+                runge_kutta::imex_time_step<operations_type, flow_problem_type, control_type, typename types::solver_type>,
+                runge_kutta::implicit_time_step<operations_type, problem_type, control_type, typename types::solver_type>>;
+    const auto &settings   = config.at( "adaptation" );
+    auto        ops        = std::make_shared<operations_type>( Equation::size );
+    auto        adaptation = [&]() {
+        typename Controller::params p;
+        if constexpr ( std::is_same_v<Controller, adaptation_type> )
+        {
+            p.step_size = settings.at( "initial_step" ).get<double>();
+            require( p.step_size <= settings.at( "maximum_step" ).get<double>(), "Constant step exceeds maximum" );
+            return std::make_shared<control_type>( p );
+        }
+        else
+        {
+            p.relative_tolerance = settings.at( "relative_tolerance" ).get<double>();
+            p.absolute_tolerance = settings.at( "absolute_tolerance" ).get<double>();
+            p.initial_step       = settings.at( "initial_step" ).get<double>();
+            p.minimum_step       = settings.at( "minimum_step" ).get<double>();
+            p.maximum_step       = settings.at( "maximum_step" ).get<double>();
+            if constexpr ( std::is_same_v<Controller, integration::time_step_adaptation_filter<operations_type>> )
+                p.controller = controller;
+            auto result            = std::make_shared<control_type>( ops, p );
+            result->expected_order = IMEX ? runge_kutta::make_imex_butcher_table( method ).error_order()
+                                                 : runge_kutta::make_butcher_table( method ).error_order();
+            return result;
+        }
+    }();
+    auto problem      = std::make_shared<problem_type>( ops, equation );
+    auto flow_problem = [&]() {
+        if constexpr ( IMEX )
+        {
+            using explicit_type = benchmark_explicit_partition<Equation>;
+            auto bundle         = std::make_shared<typename flow_problem_type::imex_operator_type>(
+                std::make_shared<explicit_type>( explicit_type{ equation } ), problem
+            );
+            return std::make_shared<flow_problem_type>( flow_problem_type{ std::move( bundle ) } );
+        }
+        else
+            return problem;
+    }();
+    auto solver = types::make_solver( ops );
+    auto step =
+        std::make_shared<step_type>( ops, flow_problem, adaptation, solver, typename step_type::params{ method } );
     const double start = config.at( "start_time" ).get<double>(), end = config.at( "end_time" ).get<double>();
     require(
         std::isfinite( start ) && std::isfinite( end ) && end > start && std::isfinite( end - start ),
@@ -122,7 +171,10 @@ int integrate(
     metadata["method"]     = method;
     metadata["controller"] = controller;
     metadata["backend"]    = backend_name;
-    auto writer            = std::make_shared<trajectory_writer<Equation>>( ops, path, metadata );
+    metadata["scheme"]     = IMEX ? "imex" : "dirk";
+    if constexpr ( IMEX )
+        metadata["splitting"] = config.at( "splitting" );
+    auto writer = std::make_shared<trajectory_writer<Equation>>( ops, path, metadata );
     writer->record( start, *initial );
     integration::time_integrator<operations_type, step_type, trajectory_writer<Equation>> integrator(
         ops, step, { config.at( "maximum_steps" ).get<std::size_t>() }, writer
@@ -148,21 +200,45 @@ int integrate(
     return completed ? 0 : 1;
 }
 
+template <class Equation, class Controller>
+int select_method(
+    const Equation &equation, const json &config, const std::string &path, const std::string &method,
+    const std::string &controller
+)
+{
+    if ( method.rfind( "IMEX_", 0 ) == 0 )
+    {
+        if constexpr ( benchmark_supports_imex<Equation> )
+        {
+            require(
+                controller == "constant" || runge_kutta::make_imex_butcher_table( method ).is_embedded(),
+                "This IMEX table requires the constant controller"
+            );
+            return integrate<Equation, Controller, true>( equation, config, path, method, controller );
+        }
+        else
+            throw std::invalid_argument( "IMEX benchmarks do not support singular-mass DAEs" );
+    }
+    return integrate<Equation, Controller>( equation, config, path, method, controller );
+}
+
 template <class Equation>
 int select_controller(
     const Equation &equation, const json &config, const std::string &path, const std::string &method,
     const std::string &controller
 )
 {
+    if ( controller == "constant" )
+        return select_method<Equation, adaptation_type>( equation, config, path, method, controller );
     if ( controller == "matlab" )
-        return integrate<Equation, integration::time_step_adaptation_matlab<operations_type>>(
+        return select_method<Equation, integration::time_step_adaptation_matlab<operations_type>>(
             equation, config, path, method, controller
         );
     if ( controller == "scipy" )
-        return integrate<Equation, integration::time_step_adaptation_scipy<operations_type>>(
+        return select_method<Equation, integration::time_step_adaptation_scipy<operations_type>>(
             equation, config, path, method, controller
         );
-    return integrate<Equation, integration::time_step_adaptation_filter<operations_type>>(
+    return select_method<Equation, integration::time_step_adaptation_filter<operations_type>>(
         equation, config, path, method, controller
     );
 }
@@ -170,7 +246,7 @@ int select_controller(
 int main( int argc, char **argv )
 try
 {
-    require( argc == 5, "Usage: system_dirk.bin config.json trajectory.dat METHOD CONTROLLER" );
+    require( argc == 5, "Usage: ode_benchmarks.bin config.json trajectory.dat METHOD CONTROLLER" );
     std::ifstream input( argv[1] );
     input.exceptions( std::ios::failbit | std::ios::badbit );
     const auto  config     = json::parse( input );
