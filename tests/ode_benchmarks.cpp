@@ -1,5 +1,5 @@
 #include "ode_benchmark_imex.h"
-#include <nmfd/time_steppers/bdf/implicit_time_step.h>
+#include "implicit_bdf_adaptive_test.h"
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -173,7 +173,8 @@ int integrate(
     using problem_type = std::conditional_t<IMEX, benchmark_implicit_partition<Equation>, stage_problem<Equation>>;
     using types        = newton_types<problem_type>;
     using control_type = std::conditional_t<
-        std::is_same_v<Controller, adaptation_type>, benchmark_constant_controller, observed_controller<Controller>>;
+        std::is_same_v<Controller, adaptation_type>, benchmark_constant_controller,
+        std::conditional_t<BDF, bdf_test::observed_bdf_controller<Controller>, observed_controller<Controller>>>;
     using flow_problem_type = std::conditional_t<IMEX, benchmark_imex_problem<Equation>, problem_type>;
     using rk_step_type      = std::conditional_t<
              IMEX,
@@ -205,9 +206,10 @@ int integrate(
             p.maximum_step       = settings.at( "maximum_step" ).get<double>();
             if constexpr ( std::is_same_v<Controller, integration::time_step_adaptation_filter<operations_type>> )
                 p.controller = controller;
-            auto result            = std::make_shared<control_type>( ops, p );
-            result->expected_order = IMEX ? runge_kutta::make_imex_butcher_table( method ).error_order()
-                                                 : runge_kutta::make_butcher_table( method ).error_order();
+            auto result = std::make_shared<control_type>( ops, p );
+            if constexpr ( !BDF )
+                result->expected_order = IMEX ? runge_kutta::make_imex_butcher_table( method ).error_order()
+                                                     : runge_kutta::make_butcher_table( method ).error_order();
             return result;
         }
     }();
@@ -224,9 +226,14 @@ int integrate(
         else
             return problem;
     }();
-    auto solver = types::make_solver( ops );
-    auto step =
-        std::make_shared<step_type>( ops, flow_problem, adaptation, solver, typename step_type::params{ method } );
+    auto                       solver = types::make_solver( ops );
+    typename step_type::params step_settings{ method };
+    if constexpr ( BDF )
+    {
+        step_settings.adaptive      = !std::is_same_v<Controller, adaptation_type>;
+        step_settings.maximum_order = config.value( "bdf_maximum_order", 5u );
+    }
+    auto         step  = std::make_shared<step_type>( ops, flow_problem, adaptation, solver, step_settings );
     const double start = config.at( "start_time" ).get<double>(), end = config.at( "end_time" ).get<double>();
     require(
         std::isfinite( start ) && std::isfinite( end ) && end > start && std::isfinite( end - start ),
@@ -246,6 +253,12 @@ int integrate(
     metadata["backend"]            = backend_name;
     metadata["scheme"]             = BDF ? "bdf" : IMEX ? "imex" : "dirk";
     metadata["dense_output_order"] = step->dense_output_order();
+    if constexpr ( BDF )
+    {
+        metadata["adaptive"] = step_settings.adaptive;
+        if ( method == "BDF" )
+            metadata["maximum_order"] = step_settings.maximum_order;
+    }
     if constexpr ( IMEX )
         metadata["splitting"] = config.at( "splitting" );
     auto writer = [&]() {
@@ -266,16 +279,24 @@ int integrate(
         writer->rows == integrator.get_steps() + 1 && adaptation->commits == integrator.get_steps(),
         "Accepted-step accounting mismatch"
     );
-    writer->complete(
-        { { "status", completed ? "completed" : "failed" },
-          { "final_time", integrator.get_final_time() },
-          { "accepted_steps", integrator.get_steps() },
-          { "error_rejections", adaptation->error_rejections },
-          { "numerical_rejections", adaptation->numerical_rejections },
-          { "linearizations", problem->linearizations },
-          { "step_status", static_cast<int>( step->get_status() ) },
-          { "newton_status", solver->convergence_strategy()->get_result_status() } }
-    );
+    json report = {
+        { "status", completed ? "completed" : "failed" },
+        { "final_time", integrator.get_final_time() },
+        { "accepted_steps", integrator.get_steps() },
+        { "error_rejections", adaptation->error_rejections },
+        { "numerical_rejections", adaptation->numerical_rejections },
+        { "linearizations", problem->linearizations },
+        { "step_status", static_cast<int>( step->get_status() ) },
+        { "newton_status", solver->convergence_strategy()->get_result_status() }
+    };
+    if constexpr ( BDF && !std::is_same_v<Controller, adaptation_type> )
+    {
+        report["orders_used"] = json::array();
+        for ( unsigned int q = 1; q <= 5; ++q )
+            if ( adaptation->committed_orders & ( 1u << q ) )
+                report["orders_used"].push_back( q );
+    }
+    writer->complete( report );
     return completed ? 0 : 1;
 }
 
@@ -285,6 +306,11 @@ int select_method(
     const std::string &controller
 )
 {
+    if ( method == "BDF1" || method == "BDF2" || method == "BDF" )
+    {
+        require( config.value( "sample_step", 0. ) == 0, "BDF dense sampling is not implemented" );
+        return integrate<Equation, Controller, false, false, true>( equation, config, path, method, controller );
+    }
     if ( method.rfind( "IMEX_", 0 ) == 0 )
     {
         if constexpr ( benchmark_supports_imex<Equation> )
@@ -309,14 +335,6 @@ int select_controller(
     const std::string &controller
 )
 {
-    if ( method == "BDF1" || method == "BDF2" )
-    {
-        require(
-            controller == "constant" && config.value( "sample_step", 0. ) == 0,
-            "Fixed BDF benchmarks require constant steps without dense sampling"
-        );
-        return integrate<Equation, adaptation_type, false, false, true>( equation, config, path, method, controller );
-    }
     if ( controller == "constant" )
         return select_method<Equation, adaptation_type>( equation, config, path, method, controller );
     if ( controller == "matlab" )

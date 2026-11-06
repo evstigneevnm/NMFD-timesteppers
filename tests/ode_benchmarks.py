@@ -17,8 +17,8 @@ MODULE = HERE.parent
 CONTROLLERS = ("matlab", "scipy", "I", "H211", "PC", "PID", "H312", "PPID", "H321")
 DEFAULT_METHODS = ("SDIRK2(1)2", "SDIRK3(1)3", "IMEX_ARK324L2SA")
 FIXED_IMEX_METHODS = ("IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233")
-FIXED_BDF_METHODS = ("BDF1", "BDF2")
-METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS + FIXED_BDF_METHODS
+BDF_METHODS = ("BDF1", "BDF2", "BDF")
+METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS + BDF_METHODS
 SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "coupled_mass", "state_mass",
            "time_mass", "coupled_dae", "moving_dae", "stokes_dae", "time_coefficient", "stiff_tracking")
 IMEX_SPLITS = {
@@ -119,6 +119,8 @@ def arguments(argv=None):
     parser.add_argument("--max-steps", type=int, default=2_000_000)
     parser.add_argument("--max-relative-error", type=positive, default=.01)
     parser.add_argument("--methods", choices=METHODS, nargs="+", default=list(DEFAULT_METHODS))
+    parser.add_argument("--bdf-max-order", type=int, choices=range(1, 6), default=5,
+                        help="Maximum order for adaptive --methods BDF")
     parser.add_argument("--controllers", choices=(*CONTROLLERS, "constant"), nargs="+", default=list(CONTROLLERS))
     parser.add_argument("--backend", choices=("cpu", "cpu_omp", "cuda"), default="cpu")
     parser.add_argument("--threads", type=int, default=1)
@@ -157,8 +159,8 @@ def configuration(args, system):
         raise ValueError(f"{system}: IMEX benchmarks do not support singular-mass DAEs; select a DIRK method")
     if any(method in FIXED_IMEX_METHODS for method in methods) and "constant" not in args.controllers:
         raise ValueError("Fixed IMEX tables require --controllers constant (no combined embedded estimator)")
-    if any(method in FIXED_BDF_METHODS for method in methods) and "constant" not in args.controllers:
-        raise ValueError("Fixed BDF methods require --controllers constant (no error estimator)")
+    if "BDF" in methods and not any(controller != "constant" for controller in args.controllers):
+        raise ValueError("Automatic BDF requires an error-requiring controller")
     if args.sample_step and (methods != ["IMEX_ARK324L2SA"] or system not in IMEX_SPLITS):
         raise ValueError("Uniform dense sampling requires --methods IMEX_ARK324L2SA on an ODE/nonsingular-mass system")
     if args.sample_step and (start + args.sample_step == start or end - args.sample_step == end):
@@ -166,7 +168,8 @@ def configuration(args, system):
     cases = [dict(method=method, controller=controller,
                   filename=method.replace("(", "_").replace(")", "_") + "_" + controller + ".dat")
              for method in methods for controller in dict.fromkeys(args.controllers)
-             if method not in FIXED_IMEX_METHODS + FIXED_BDF_METHODS or controller == "constant"]
+             if (method not in FIXED_IMEX_METHODS or controller == "constant")
+             and (method != "BDF" or controller != "constant")]
     return dict(system=system, backend=args.backend, start_time=start, end_time=end,
                   initial_state=initial, parameters=definition["parameters"], labels=definition["labels"],
                   maximum_steps=args.max_steps, max_relative_error=args.max_relative_error,
@@ -176,6 +179,7 @@ def configuration(args, system):
                   splitting=IMEX_SPLITS.get(system),
                   skipped_methods=[method for method in dict.fromkeys(args.methods) if method not in methods],
                   sample_step=args.sample_step,
+                  bdf_maximum_order=args.bdf_max_order,
                   cases=cases)
 
 
@@ -271,9 +275,16 @@ def read_trajectory(path, config, case, sampled=False):
     for key in ("method", "controller"):
         if metadata[key] != case[key]:
             raise ValueError(f"Unexpected {key}")
-    scheme = "bdf" if case["method"] in FIXED_BDF_METHODS else "imex" if case["method"].startswith("IMEX_") else "dirk"
+    scheme = "bdf" if case["method"] in BDF_METHODS else "imex" if case["method"].startswith("IMEX_") else "dirk"
     if metadata.get("scheme", "dirk") != scheme:
         raise ValueError("Unexpected integration scheme")
+    if case["method"] == "BDF":
+        cap = config.get("bdf_maximum_order", 5)
+        orders = report.get("orders_used", [])
+        if (metadata.get("maximum_order") != cap or metadata.get("adaptive") is not True
+                or not orders or any(type(order) is not int or not 1 <= order <= cap for order in orders)
+                or orders != sorted(set(orders)) or orders[0] != 1):
+            raise ValueError("Invalid automatic BDF order report")
     if scheme == "imex" and (not config.get("splitting") or metadata.get("splitting") != config["splitting"]):
         raise ValueError("Inconsistent IMEX splitting metadata")
     if sampled and (metadata.get("sampling") != "uniform_dense" or metadata.get("dense_output_order") != 3

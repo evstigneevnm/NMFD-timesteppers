@@ -81,17 +81,17 @@ class BenchmarkAssemblyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "singular-mass"):
             runner.configuration(args, "stokes_dae")
 
-    def test_bdf_is_fixed_step_and_supports_all_existing_systems(self):
+    def test_bdf_supports_fixed_and_adaptive_controllers_on_all_systems(self):
         args = self.args("--methods", "BDF1", "BDF2", "SDIRK2(1)2", "--controllers", "constant", "scipy")
         for system in runner.SYSTEMS:
             config = runner.configuration(args, system)
             self.assertEqual([(case["method"], case["controller"]) for case in config["cases"]],
-                             [("BDF1", "constant"), ("BDF2", "constant"),
+                             [("BDF1", "constant"), ("BDF1", "scipy"),
+                              ("BDF2", "constant"), ("BDF2", "scipy"),
                               ("SDIRK2(1)2", "constant"), ("SDIRK2(1)2", "scipy")])
             self.assertEqual(config["skipped_methods"], [])
         args = self.args("--methods", "BDF2")
-        with self.assertRaisesRegex(ValueError, "controllers constant"):
-            runner.configuration(args, "lorenz")
+        self.assertEqual(len(runner.configuration(args, "lorenz")["cases"]), len(args.controllers))
         args = self.args("--methods", "BDF2", "--controllers", "constant", "--sample-step", ".01")
         with self.assertRaisesRegex(ValueError, "dense sampling"):
             runner.configuration(args, "lorenz")
@@ -100,6 +100,18 @@ class BenchmarkAssemblyTests(unittest.TestCase):
         for step in ("1e-10", "1"):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.args("--controllers", "constant", "--step", step)
+
+    def test_automatic_bdf_order_cap_and_controller_selection(self):
+        args = self.args("--methods", "BDF", "--controllers", "constant", "scipy", "--bdf-max-order", "3")
+        for system in runner.SYSTEMS:
+            config = runner.configuration(args, system)
+            self.assertEqual(config["bdf_maximum_order"], 3)
+            self.assertEqual([(case["method"], case["controller"]) for case in config["cases"]], [("BDF", "scipy")])
+        with self.assertRaisesRegex(ValueError, "error-requiring"):
+            runner.configuration(self.args("--methods", "BDF", "--controllers", "constant"), "lorenz")
+        for cap in ("0", "6"):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.args("--methods", "BDF", "--bdf-max-order", cap)
 
     def test_build_only_forces_make_without_scientific_packages_or_execution(self):
         with mock.patch.object(runner.subprocess, "run", side_effect=self.fake_make), \
@@ -337,6 +349,19 @@ class BenchmarkDiagnosticsTests(unittest.TestCase):
             self.np.savetxt(stream, data, fmt="%.17g")
             stream.write("# " + json.dumps(dict(self.report, rows=len(data))) + "\n")
         return path, data
+
+    def test_automatic_bdf_validates_committed_order_report(self):
+        self.case["method"] = "BDF"
+        self.config["bdf_maximum_order"] = 3
+        self.metadata.update(method="BDF", scheme="bdf", maximum_order=3, adaptive=True)
+        self.report["orders_used"] = [1, 2, 3]
+        self.save()
+        runner.read_trajectory(self.path, self.config, self.case)
+        for invalid in ([1, 4], [], [2, 3], [1, 2, 2], [True, 2]):
+            self.report["orders_used"] = invalid
+            self.save()
+            with self.assertRaisesRegex(ValueError, "order report"):
+                runner.read_trajectory(self.path, self.config, self.case)
 
     def test_uniform_dense_samples_keep_accepted_step_accounting(self):
         path, expected = self.make_dense_samples()

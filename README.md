@@ -273,7 +273,7 @@ Its `implicit_part` supplies the shifted residual/Jacobian and optionally
 forcing. Retain shared model data without a back-pointer to the bundle/application;
 bind solvers once at assembly.
 
-## Fixed-Step BDF
+## BDF
 
 `bdf/implicit_time_step.h` supplies `BDF1` and `BDF2` through the same four
 template dependencies and constructor arguments as implicit RK. Nested `params`
@@ -294,12 +294,76 @@ Roundoff-only endpoint clipping does not spuriously lower the order. Discontinuo
 `set_time()` and `reset()` clear history; reset after independent state/model
 changes. As with RK, the caller sets the next starting time after finalization.
 
-Workspace is one backend vector for BDF1 and three for BDF2: candidate, pending
+Fixed-step workspace is one backend vector for BDF1 and three for BDF2: candidate, pending
 input and older committed state. It is reused for in-place stepping, retries and
 repeated trajectories. There are no vector-sized host transfers or per-step
-allocations in the engine. This stage has no error estimator or dense output;
-error-requiring controllers return `error_estimate_unavailable`.
-Adaptive BDF1-5 with modified divided-difference history is a separate stage.
+allocations in the engine. Fixed mode remains the default; error-requiring
+controllers return `error_estimate_unavailable` unless `params.adaptive=true`.
+
+Adaptive mode uses variable-grid BDF coefficients and scaled committed divided
+differences. With `r=h/h_previous`, BDF2 sets
+`alpha=(1+2*r)/((1+r)*h)` and
+`previous_state()=u_n+r*r/(1+2*r)*(u_n-u_{n-1})`.
+The default usable step-ratio interval is `[0.2,2]`, configurable through
+`minimum_step_ratio` and `maximum_step_ratio` (growth cannot exceed 2).
+Growth is capped; extreme shrinkage or direction reversal restarts history.
+
+For error-requiring controllers, startup estimates the full backward-Euler
+candidate against two half steps, with error `2*(full-two_half)`. The full
+candidate is retained. Subsequent estimates use polynomial defects corrected
+for the computed candidate's contribution to the highest divided difference.
+BDF2 begins after two committed intervals. The existing MATLAB/SciPy/filter
+controllers receive state-unit errors with local-error exponents 2 and 3;
+their interface is unchanged. Tightening local tolerances controls an estimate,
+not an identical bound on accumulated global error.
+
+Adaptive workspace with error estimation is four vectors for BDF1 and five for
+BDF2, allocated once. Failed solves, rejected trials and failed commits do not
+modify divided differences. Modified endpoints, independent model/state changes
+and discontinuous time changes follow the same restart rules as fixed mode.
+No mass inversion or `evaluate_rate()` is introduced. DAE error estimation remains
+formulation-dependent; accepted algebraic constraints retain their own tests.
+Dense output remains deferred.
+
+### Automatic Order 1-5
+
+Opt in without changing the problem, solver, controller or integrator interfaces:
+
+```cpp
+step_type::params p;
+p.method = "BDF";
+p.adaptive = true;
+p.maximum_order = 5;
+```
+
+`BDF` requires an error-requiring controller. `maximum_order` is 1-5 and applies
+only to this mode; existing `BDF1`/`BDF2` behavior and defaults are unchanged.
+Coefficients follow the actual grid, using a scaled Newton divided-difference
+history. Start at order one, then raise by one after at least `max(3,q+1)` clean
+commits at order `q`, provided sufficient history is available. Two failed trials
+lower the retry order by one; four fall back to order one. Failed/rejected commits
+never promote order, and modified endpoints restart both history and policy.
+The current LTE is assessed once per trial with exponent `q+1`; the existing
+controller alone owns error weighting and its timestep proposal.
+Newton starts from the committed state, not the extrapolating polynomial: a small
+predicted residual can conceal a larger pressure/state error in a poorly
+conditioned constrained problem. The polynomial is still used for LTE estimation.
+Residual tolerances must remain appropriate for the formulation and conditioning.
+
+Automatic mode caps growth at 1.2 (or a smaller configured limit). Orders 3-5
+require every adjacent ratio in their recent grid to lie in `[0.8,1.2]`;
+otherwise the attempt uses at most order two. These are conservative grid rules,
+not an optimal order selector or a stability-limit detector. BDF3-5 are not
+A-stable; weakly damped modes need accuracy/stability validation for the problem.
+
+History construction and each commit require O(qN) backend work. With a configured
+cap `m`, automatic mode owns `3+m+(m>2)` vectors: candidate, pending input, error,
+`m` divided differences and, for higher orders, one rotating scratch buffer.
+This is nine vectors at cap five, allocated once, with no vector-sized host
+transfers. No trajectory-sized history is retained. Cold-start error remains part
+of the global error: formal order tests use exact histories separately, while
+complete cold-start trajectories verify tolerance refinement. No general high-index
+DAE accuracy guarantee is inferred from the manufactured constraint tests.
 
 Run the serial/OpenMP and CUDA suites with `make test_bdf_cpu` and
 `make test_bdf_cuda`. Separate formula, lifecycle, mass/DAE and backend tests
@@ -307,11 +371,15 @@ cover orders, stiff decay, non-autonomous times, backward integration, endpoint
 modification, rollback, ownership and transfer guards. The DAE cases establish
 capability for the tested formulations, not arbitrary DAE support.
 
-The existing visual runner accepts fixed BDF cases without changing its defaults:
+The visual runner accepts fixed and adaptive BDF cases without changing its defaults:
 
 ```sh
 bash tests/run_all.sh --methods BDF1 BDF2 --controllers constant \
   --end 0.4 --step 0.0002
+bash tests/run_all.sh --methods BDF1 BDF2 --controllers matlab scipy PID \
+  --end 0.4 --rtol 1e-6 --atol 1e-8
+bash tests/run_all.sh --methods BDF --bdf-max-order 5 --controllers matlab scipy PID \
+  --end 0.4 --rtol 1e-7 --atol 1e-9
 ```
 
 ## IMEX RK

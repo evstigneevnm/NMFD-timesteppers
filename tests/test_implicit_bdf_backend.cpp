@@ -1,4 +1,5 @@
 #include "implicit_bdf_test.h"
+#include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
 
@@ -128,6 +129,26 @@ struct problem_type
     }
 };
 
+struct adaptive_controller : integration::time_step_adaptation_scipy<space_type>
+{
+    using base = integration::time_step_adaptation_scipy<space_type>;
+    using base::base;
+    unsigned int maximum_order = 0;
+    void         reset()
+    {
+        base::reset();
+        maximum_order = 0;
+    }
+    adaptation_status assess(
+        double t, double h, const state_type &in, const state_type &out, double &next, unsigned int exponent = 0,
+        const state_type *error = nullptr
+    )
+    {
+        maximum_order = std::max( maximum_order, exponent - 1 );
+        return base::assess( t, h, in, out, next, exponent, error );
+    }
+};
+
 int main()
 try
 {
@@ -154,8 +175,7 @@ try
         blocked = true;
     }
     require( blocked, "BDF bulk-copy guard is not connected" );
-    for ( const char *method : { "BDF1", "BDF2" } )
-    {
+    auto make_solver = [&]() {
         linear::params lp;
         lp.basis_size      = 4;
         lp.batch_size      = 1;
@@ -165,24 +185,59 @@ try
         np.abs_tol         = 1e-10;
         np.rel_tol         = 1e-12;
         auto linear_solver = std::make_shared<linear>( ops, nullptr, lp );
-        auto solver        = std::make_shared<solver_type>(
+        return std::make_shared<solver_type>(
             ops, nullptr, std::make_shared<iteration>( ops, linear_solver ),
             std::make_shared<strategy>( ops, nullptr, np )
         );
-        auto step = std::make_shared<step_type>(
-            ops, problem, std::make_shared<control_type>( control_type::params{ .02 } ), solver,
-            step_type::params{ method }
-        );
-        integration::time_integrator<space_type, step_type> flow( ops, step );
-        flow.set_time_interval( 0, .2 );
+    };
+    for ( const char *method : { "BDF1", "BDF2", "BDF" } )
+    {
+        if ( std::string( method ) != "BDF" )
+        {
+            auto step = std::make_shared<step_type>(
+                ops, problem, std::make_shared<control_type>( control_type::params{ .02 } ), make_solver(),
+                step_type::params{ method }
+            );
+            integration::time_integrator<space_type, step_type> flow( ops, step );
+            flow.set_time_interval( 0, .2 );
+            for ( int run = 0; run < 2; ++run )
+            {
+                ops->assign_scalar( 1., *state );
+                flow.apply( *state, *state );
+                require( flow.get_status() == integration_status::completed, "Matrix-free BDF integration failed" );
+                ops->add_mul_scalar( -std::exp( -.2 ), 1., *state );
+                require(
+                    ops->norm_l2( *state ) / std::sqrt( double( ops->size() ) ) < .002,
+                    "Matrix-free BDF trajectory error"
+                );
+            }
+        }
+        using adaptive_control = adaptive_controller;
+        using adaptive_step    = bdf::implicit_time_step<space_type, problem_type, adaptive_control, solver_type>;
+        adaptive_control::params cp;
+        cp.relative_tolerance = 1e-6;
+        cp.absolute_tolerance = 1e-8;
+        cp.initial_step = cp.maximum_step = .2;
+        typename adaptive_step::params p{ method };
+        p.adaptive    = true;
+        auto control  = std::make_shared<adaptive_control>( ops, cp );
+        auto adaptive = std::make_shared<adaptive_step>( ops, problem, control, make_solver(), p );
+        integration::time_integrator<space_type, adaptive_step> adaptive_flow( ops, adaptive );
+        adaptive_flow.set_time_interval( 0, .2 );
         for ( int run = 0; run < 2; ++run )
         {
             ops->assign_scalar( 1., *state );
-            flow.apply( *state, *state );
-            require( flow.get_status() == integration_status::completed, "Matrix-free BDF integration failed" );
+            adaptive_flow.apply( *state, *state );
+            require(
+                adaptive_flow.get_status() == integration_status::completed,
+                "Matrix-free adaptive BDF integration failed"
+            );
+            if ( std::string( method ) == "BDF" )
+                require( control->maximum_order >= 3, "Guarded BDF did not exercise higher-order backend history" );
             ops->add_mul_scalar( -std::exp( -.2 ), 1., *state );
             require(
-                ops->norm_l2( *state ) / std::sqrt( double( ops->size() ) ) < .002, "Matrix-free BDF trajectory error"
+                ops->norm_l2( *state ) / std::sqrt( double( ops->size() ) ) < .0003,
+                "Matrix-free adaptive BDF trajectory error"
             );
         }
     }
