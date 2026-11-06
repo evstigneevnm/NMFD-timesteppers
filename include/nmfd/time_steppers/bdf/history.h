@@ -8,6 +8,7 @@
 #include <memory>
 #include <nmfd/detail/vector_wrap.h>
 #include <nmfd/time_steppers/bdf/coefficients.h>
+#include <nmfd/time_steppers/bdf/continuous_integration.h>
 
 namespace nmfd::time_steppers::bdf
 {
@@ -97,6 +98,21 @@ public:
         operations_.assign( in, out );
         for ( unsigned int i = 0; i < c.order; ++i )
             operations_.add_lin_comb( c.predictor[i], **differences_[i], out );
+    }
+
+    // Read-only degree-q interpolation through the candidate and q old nodes.
+    // The extra difference used by the LTE estimator is deliberately excluded.
+    void interpolate(
+        unsigned int order, scalar_type theta, scalar_type h, const vector_type &in, const vector_type &candidate,
+        vector_type &out
+    ) const
+    {
+        if ( order > count_ + 1 )
+            throw std::logic_error( "Insufficient BDF interpolation history" );
+        const auto c = make_interpolation( order, theta, h, steps_ );
+        operations_.assign_lin_comb( scalar_type( 1 ) - c.endpoint, in, c.endpoint, candidate, out );
+        for ( unsigned int i = 0; i + 1 < order; ++i )
+            operations_.add_lin_comb( c.differences[i], **differences_[i], out );
     }
 
     // Candidate-corrected polynomial defect in state units:

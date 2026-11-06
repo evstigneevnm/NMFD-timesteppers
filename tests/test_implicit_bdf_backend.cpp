@@ -13,9 +13,12 @@ struct guarded_memory : backend_type::memory_type
 {
     using parent = backend_type::memory_type;
     inline static std::map<std::uintptr_t, std::size_t> allocations;
+    inline static std::size_t                           allocation_count = 0;
+    inline static std::size_t                           transfer_count   = 0;
     static void                                         malloc( void **pointer, std::size_t bytes )
     {
         parent::malloc( pointer, bytes );
+        ++allocation_count;
         if ( bytes )
             allocations.emplace( reinterpret_cast<std::uintptr_t>( *pointer ), bytes );
     }
@@ -36,12 +39,14 @@ struct guarded_memory : backend_type::memory_type
     }
     static void copy_to_host( std::size_t bytes, const void *src, void *dst )
     {
+        ++transfer_count;
         if ( bytes > sizeof( double ) )
             throw std::runtime_error( "BDF vector-sized host download" );
         parent::copy_to_host( bytes, src, dst );
     }
     static void copy_from_host( std::size_t bytes, const void *src, void *dst )
     {
+        ++transfer_count;
         if ( bytes > sizeof( double ) )
             throw std::runtime_error( "BDF vector-sized device upload" );
         parent::copy_from_host( bytes, src, dst );
@@ -241,6 +246,43 @@ try
             );
         }
     }
+    // Sample higher-order history on the selected backend, without new vector
+    // allocations or even scalar host transfers during interpolation itself.
+    using dense_step = bdf::implicit_time_step<space_type, problem_type, adaptive_controller, solver_type, true>;
+    adaptive_controller::params cp;
+    cp.relative_tolerance = 1e-6;
+    cp.absolute_tolerance = 1e-8;
+    cp.initial_step = cp.maximum_step = .02;
+    dense_step::params p{ "BDF" };
+    p.adaptive = true;
+    dense_step  dense( ops, problem, std::make_shared<adaptive_controller>( ops, cp ), make_solver(), p );
+    buffer_type sample( *ops ), repeat( *ops );
+    sample.start_use();
+    repeat.start_use();
+    ops->assign_scalar( 1., *state );
+    dense.set_target_time( 1 );
+    double       time          = 0;
+    unsigned int maximum_order = 1;
+    for ( int i = 0; i < 50; ++i )
+    {
+        dense.set_time( time );
+        dense.apply( *state, *state );
+        require( dense.get_status() == single_step_status::converged, "Guarded dense BDF failed" );
+        maximum_order        = std::max( maximum_order, dense.get_order() );
+        const auto allocated = guarded_memory::allocation_count;
+        const auto transfers = guarded_memory::transfer_count;
+        const auto view      = dense.get_continuous_integration();
+        for ( double theta : { 0., .19, .67, 1., .19 } )
+            view.evaluate( theta, *sample );
+        view.evaluate( .19, *repeat );
+        require( allocated == guarded_memory::allocation_count, "Dense BDF allocated backend memory" );
+        require( transfers == guarded_memory::transfer_count, "Dense BDF sampling transferred host data" );
+        ops->add_lin_comb( -1., *sample, *repeat );
+        require( ops->norm( *repeat ) == 0, "Guarded repeated BDF sample changed" );
+        time = view.evaluate( 1, *sample );
+        dense.finalize( adaptation_status::accepted, time, *state );
+    }
+    require( maximum_order >= 3, "Guarded dense BDF did not exercise high-order interpolation" );
     std::cout << "Matrix-free BDF, 8192 unknowns and blocked vector-sized host transfers: PASS\n";
 }
 catch ( const std::exception &error )

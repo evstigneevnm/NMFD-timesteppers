@@ -3,10 +3,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <nmfd/detail/vector_wrap.h>
 #include <nmfd/time_steppers/bdf/coefficients.h>
@@ -18,7 +20,8 @@
 
 namespace nmfd::time_steppers::bdf
 {
-template <class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver>
+template <
+    class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false>
 class implicit_time_step
 {
 public:
@@ -77,10 +80,13 @@ public:
         retain_history_ = p.method == "BDF2" || estimate_error_;
         work_.init();
         work_.start_use();
-        if ( retain_history_ )
+        if ( retain_history_ || DenseOutput )
         {
             base_.init();
             base_.start_use();
+        }
+        if ( retain_history_ )
+        {
             if ( p.adaptive )
             {
                 auto capacity = estimate_error_ && p.method == "BDF2" ? 2u : 1u;
@@ -140,12 +146,23 @@ public:
     }
     unsigned int dense_output_order() const
     {
-        return 0;
+        return DenseOutput ? order_ : 0;
+    }
+
+    // Borrow the current candidate and immutable history until finalize/reset.
+    template <bool Enabled = DenseOutput, std::enable_if_t<Enabled && DenseOutput, int> = 0>
+    runge_kutta::continuous_integration<implicit_time_step> get_continuous_integration() const
+    {
+        if ( !pending_ )
+            throw std::logic_error( "No BDF candidate for dense output" );
+        return { *this, generation_ };
     }
 
     // Discard trajectory history without reallocating any workspace.
     void reset()
     {
+        if constexpr ( DenseOutput )
+            ++generation_;
         adaptation_->reset();
         initialized_ = pending_ = history_ready_ = false;
         dt_ = history_dt_ = scalar_type( 0 );
@@ -162,6 +179,8 @@ public:
     void apply( const vector_type &in, vector_type &out )
     {
         require_finalized();
+        if constexpr ( DenseOutput )
+            ++generation_;
         attempts_ = 0;
         if ( adaptation_->requires_error_estimate() && !estimate_error_ )
         {
@@ -232,7 +251,7 @@ public:
             const auto  decision = assess( in, next_dt );
             if ( decision == adaptation_status::accepted )
             {
-                if ( retain_history_ )
+                if ( retain_history_ || DenseOutput )
                     operations_->assign( in, *base_ );
                 operations_->assign( *work_, out );
                 status_  = single_step_status::converged;
@@ -293,6 +312,7 @@ public:
     }
 
 private:
+    friend class runge_kutta::continuous_integration<implicit_time_step>;
     using vector_wrap_type = nmfd::detail::vector_wrap<VectorOperations, false, false>;
     std::shared_ptr<VectorOperations>            operations_;
     std::shared_ptr<Problem>                     problem_;
@@ -304,10 +324,35 @@ private:
     order_policy                                 order_policy_;
     scalar_type                                  time_ = 0, target_ = 1, dt_ = 0, expected_time_ = 0, history_dt_ = 0;
     unsigned int                                 attempts_ = 0, order_ = 1;
+    std::size_t                                  generation_  = 0;
     bool                                         initialized_ = false, pending_ = false, history_ready_ = false;
     bool               retain_history_ = false, estimate_error_ = false, restart_history_ = true;
     bool               automatic_order_ = false;
     single_step_status status_          = single_step_status::idle;
+
+    // Sampling never evaluates the problem or mutates pending/committed history.
+    scalar_type evaluate_dense( scalar_type theta, vector_type &out, std::size_t generation ) const
+    {
+        if ( !pending_ || generation != generation_ )
+            throw std::logic_error( "Expired BDF dense view" );
+        if ( !std::isfinite( theta ) || theta < 0 || theta > 1 )
+            throw std::invalid_argument( "BDF dense coordinate must lie in [0,1]" );
+        if ( theta == 0 )
+            operations_->assign( *base_, out );
+        else if ( theta == 1 )
+            operations_->assign( *work_, out );
+        else if ( order_ == 1 || params_.adaptive )
+            history_.interpolate( order_, theta, dt_, *base_, *work_, out );
+        else
+        {
+            const auto c = make_interpolation( 2u, theta, dt_, { history_dt_ } );
+            operations_->assign_lin_comb(
+                scalar_type( 1 ) - c.endpoint + c.differences[0], *base_, c.endpoint, *work_, out
+            );
+            operations_->add_lin_comb( -c.differences[0], *older_, out );
+        }
+        return theta == 1 ? endpoint_time() : time_ + theta * dt_;
+    }
 
     void require_finalized() const
     {

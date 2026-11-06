@@ -183,7 +183,7 @@ int integrate(
              runge_kutta::implicit_time_step<
                  operations_type, problem_type, control_type, typename types::solver_type, Dense>>;
     using step_type = std::conditional_t<
-        BDF, bdf::implicit_time_step<operations_type, problem_type, control_type, typename types::solver_type>,
+        BDF, bdf::implicit_time_step<operations_type, problem_type, control_type, typename types::solver_type, Dense>,
         rk_step_type>;
     using writer_type =
         std::conditional_t<Dense, dense_trajectory_writer<Equation, step_type>, trajectory_writer<Equation>>;
@@ -256,6 +256,8 @@ int integrate(
     if constexpr ( BDF )
     {
         metadata["adaptive"] = step_settings.adaptive;
+        if constexpr ( Dense )
+            metadata["dense_output_order_policy"] = "used_bdf_order";
         if ( method == "BDF" )
             metadata["maximum_order"] = step_settings.maximum_order;
     }
@@ -308,7 +310,13 @@ int select_method(
 {
     if ( method == "BDF1" || method == "BDF2" || method == "BDF" )
     {
-        require( config.value( "sample_step", 0. ) == 0, "BDF dense sampling is not implemented" );
+        if ( config.value( "sample_step", 0. ) > 0 )
+        {
+            if constexpr ( benchmark_supports_imex<Equation> )
+                return integrate<Equation, Controller, false, true, true>( equation, config, path, method, controller );
+            else
+                throw std::invalid_argument( "Uniform DAE sampling requires problem-owned reconstruction" );
+        }
         return integrate<Equation, Controller, false, false, true>( equation, config, path, method, controller );
     }
     if ( method.rfind( "IMEX_", 0 ) == 0 )

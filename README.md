@@ -323,7 +323,6 @@ modify divided differences. Modified endpoints, independent model/state changes
 and discontinuous time changes follow the same restart rules as fixed mode.
 No mass inversion or `evaluate_rate()` is introduced. DAE error estimation remains
 formulation-dependent; accepted algebraic constraints retain their own tests.
-Dense output remains deferred.
 
 ### Automatic Order 1-5
 
@@ -371,6 +370,37 @@ cover orders, stiff decay, non-autonomous times, backward integration, endpoint
 modification, rollback, ownership and transfer guards. The DAE cases establish
 capability for the tested formulations, not arbitrary DAE support.
 
+### Dense Output
+
+Append `true` as the fifth template argument to enable the existing borrowed
+`get_continuous_integration()` view. Its `evaluate(theta,out)` accepts finite
+`theta` in `[0,1]` and returns the sample time. It is available only for a
+successful pending candidate and expires on finalize, reset or the next attempt;
+the stepper must outlive the view. Endpoints are exact copies of saved states.
+
+At the actual step order `q`, interpolate through the candidate and `q` old
+nodes using the signed, nonuniform grid and scaled Newton differences. BDF1
+is linear; BDF2 is quadratic. `dense_output_order()` reports the actual order,
+including first-order startup/restart, not the configured cap or next proposal.
+Accuracy includes startup, node and nonlinear-solve errors; degree alone does
+not guarantee a global or arbitrary-DAE order. No extrapolation is provided.
+
+Sampling is read-only O(qN) backend algebra, without allocations, rate/mass
+solves, Newton calls or host transfers. Only fixed BDF1 needs an extra starting
+snapshot; other modes reuse existing buffers. Disabled dense output preserves
+the previous vector budgets. Shortened or externally modified commits invalidate
+the view and restart history/order at BDF1; failed commits retain old history.
+Raw interpolation need not satisfy nonlinear algebraic constraints. The
+application reconstructs/validates constrained samples before event evaluation
+or commitment; a reconstruction failure must not publish the candidate.
+
+The visual runner supports `--sample-step` for BDF on ODE/nonsingular-mass
+systems. Its metadata reports initial dense order one and
+`dense_output_order_policy="used_bdf_order"`; actual automatic orders remain
+in `orders_used`. Uniform DAE visualization still requires an explicit
+problem-owned reconstruction policy. BDF section flights are covered, but
+prepared BDF return-map derivatives are a separate implementation stage.
+
 The visual runner accepts fixed and adaptive BDF cases without changing its defaults:
 
 ```sh
@@ -380,6 +410,8 @@ bash tests/run_all.sh --methods BDF1 BDF2 --controllers matlab scipy PID \
   --end 0.4 --rtol 1e-6 --atol 1e-8
 bash tests/run_all.sh --methods BDF --bdf-max-order 5 --controllers matlab scipy PID \
   --end 0.4 --rtol 1e-7 --atol 1e-9
+bash tests/run_all.sh --systems lorenz coupled_mass --methods BDF1 BDF2 BDF \
+  --controllers scipy --end 0.4 --sample-step 0.017
 ```
 
 ## IMEX RK

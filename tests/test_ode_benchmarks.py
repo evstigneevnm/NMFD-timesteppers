@@ -93,8 +93,17 @@ class BenchmarkAssemblyTests(unittest.TestCase):
         args = self.args("--methods", "BDF2")
         self.assertEqual(len(runner.configuration(args, "lorenz")["cases"]), len(args.controllers))
         args = self.args("--methods", "BDF2", "--controllers", "constant", "--sample-step", ".01")
+        self.assertEqual(runner.configuration(args, "lorenz")["sample_step"], .01)
         with self.assertRaisesRegex(ValueError, "dense sampling"):
-            runner.configuration(args, "lorenz")
+            runner.configuration(args, "coupled_dae")
+
+    def test_bdf_uniform_sampling_preserves_configuration(self):
+        args = self.args("--methods", "BDF1", "BDF2", "BDF", "--controllers", "constant", "scipy",
+                         "--sample-step", ".017")
+        for system in runner.IMEX_SPLITS:
+            config = runner.configuration(args, system)
+            self.assertEqual(config["sample_step"], .017)
+            self.assertEqual(len(config["cases"]), 5)
 
     def test_constant_step_respects_configured_bounds(self):
         for step in ("1e-10", "1"):
@@ -334,11 +343,13 @@ class BenchmarkDiagnosticsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "scheme"):
             runner.read_trajectory(self.path, self.config, self.case)
 
-    def make_dense_samples(self):
-        self.case["method"] = "IMEX_ARK324L2SA"
+    def make_dense_samples(self, bdf=False):
+        self.case["method"] = "BDF2" if bdf else "IMEX_ARK324L2SA"
         self.config.update(sample_step=.05, splitting=runner.IMEX_SPLITS["coupled_mass"])
-        self.metadata.update(method=self.case["method"], scheme="imex", splitting=self.config["splitting"],
-                             sample_step=.05, dense_output_order=3)
+        self.metadata.update(method=self.case["method"], scheme="bdf" if bdf else "imex", splitting=self.config["splitting"],
+                             sample_step=.05, dense_output_order=1 if bdf else 3)
+        if bdf:
+            self.metadata["dense_output_order_policy"] = "used_bdf_order"
         self.save()
         path = self.path.with_name(self.path.stem + ".dense.dat")
         metadata = dict(self.metadata, sampling="uniform_dense")
@@ -372,6 +383,16 @@ class BenchmarkDiagnosticsTests(unittest.TestCase):
             runner.read_trajectory(path, self.config, self.case)
         self.config["sample_step"] = .04
         with self.assertRaises(ValueError):
+            runner.read_trajectory(path, self.config, self.case, sampled=True)
+
+    def test_bdf_dense_samples_use_actual_order_policy(self):
+        path, expected = self.make_dense_samples(bdf=True)
+        data, report = runner.read_trajectory(path, self.config, self.case, sampled=True)
+        self.np.testing.assert_array_equal(data, expected)
+        self.assertEqual(report["accepted_steps"], 2)
+        text = path.read_text().replace('"used_bdf_order"', '"fixed_fifth_order"')
+        path.write_text(text)
+        with self.assertRaisesRegex(ValueError, "dense sampling metadata"):
             runner.read_trajectory(path, self.config, self.case, sampled=True)
 
     def test_plot_validates_dense_interior_and_preserves_step_statistics(self):

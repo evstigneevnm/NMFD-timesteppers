@@ -115,7 +115,7 @@ def arguments(argv=None):
     parser.add_argument("--min-step", type=positive, default=1e-8)
     parser.add_argument("--max-step", type=positive, default=.05)
     parser.add_argument("--sample-step", type=positive, default=0,
-                        help="Uniform dense-output spacing; requires --methods IMEX_ARK324L2SA")
+                        help="Uniform dense-output spacing for BDF or IMEX_ARK324L2SA on nonsingular-mass systems")
     parser.add_argument("--max-steps", type=int, default=2_000_000)
     parser.add_argument("--max-relative-error", type=positive, default=.01)
     parser.add_argument("--methods", choices=METHODS, nargs="+", default=list(DEFAULT_METHODS))
@@ -161,8 +161,9 @@ def configuration(args, system):
         raise ValueError("Fixed IMEX tables require --controllers constant (no combined embedded estimator)")
     if "BDF" in methods and not any(controller != "constant" for controller in args.controllers):
         raise ValueError("Automatic BDF requires an error-requiring controller")
-    if args.sample_step and (methods != ["IMEX_ARK324L2SA"] or system not in IMEX_SPLITS):
-        raise ValueError("Uniform dense sampling requires --methods IMEX_ARK324L2SA on an ODE/nonsingular-mass system")
+    if args.sample_step and (any(method not in (*BDF_METHODS, "IMEX_ARK324L2SA") for method in methods)
+                             or system not in IMEX_SPLITS):
+        raise ValueError("Uniform dense sampling requires BDF or IMEX_ARK324L2SA on an ODE/nonsingular-mass system")
     if args.sample_step and (start + args.sample_step == start or end - args.sample_step == end):
         raise ValueError("Dense sample spacing cannot advance the time coordinate")
     cases = [dict(method=method, controller=controller,
@@ -287,7 +288,9 @@ def read_trajectory(path, config, case, sampled=False):
             raise ValueError("Invalid automatic BDF order report")
     if scheme == "imex" and (not config.get("splitting") or metadata.get("splitting") != config["splitting"]):
         raise ValueError("Inconsistent IMEX splitting metadata")
-    if sampled and (metadata.get("sampling") != "uniform_dense" or metadata.get("dense_output_order") != 3
+    if sampled and (metadata.get("sampling") != "uniform_dense"
+                    or metadata.get("dense_output_order") != (1 if scheme == "bdf" else 3)
+                    or (scheme == "bdf" and metadata.get("dense_output_order_policy") != "used_bdf_order")
                     or metadata.get("sample_step") != config.get("sample_step") or not config.get("sample_step")):
         raise ValueError("Invalid dense sampling metadata")
     if "backend" in config and metadata["backend"] != config["backend"]:
