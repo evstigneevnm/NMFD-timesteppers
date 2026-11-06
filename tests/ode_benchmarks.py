@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run DIRK/IMEX system benchmarks with reference comparisons and plots."""
+"""Build and run DIRK/IMEX/BDF system benchmarks with reference comparisons and plots."""
 
 import argparse
 from datetime import datetime
@@ -17,7 +17,8 @@ MODULE = HERE.parent
 CONTROLLERS = ("matlab", "scipy", "I", "H211", "PC", "PID", "H312", "PPID", "H321")
 DEFAULT_METHODS = ("SDIRK2(1)2", "SDIRK3(1)3", "IMEX_ARK324L2SA")
 FIXED_IMEX_METHODS = ("IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233")
-METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS
+FIXED_BDF_METHODS = ("BDF1", "BDF2")
+METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS + FIXED_BDF_METHODS
 SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "coupled_mass", "state_mass",
            "time_mass", "coupled_dae", "moving_dae", "stokes_dae", "time_coefficient", "stiff_tracking")
 IMEX_SPLITS = {
@@ -156,6 +157,8 @@ def configuration(args, system):
         raise ValueError(f"{system}: IMEX benchmarks do not support singular-mass DAEs; select a DIRK method")
     if any(method in FIXED_IMEX_METHODS for method in methods) and "constant" not in args.controllers:
         raise ValueError("Fixed IMEX tables require --controllers constant (no combined embedded estimator)")
+    if any(method in FIXED_BDF_METHODS for method in methods) and "constant" not in args.controllers:
+        raise ValueError("Fixed BDF methods require --controllers constant (no error estimator)")
     if args.sample_step and (methods != ["IMEX_ARK324L2SA"] or system not in IMEX_SPLITS):
         raise ValueError("Uniform dense sampling requires --methods IMEX_ARK324L2SA on an ODE/nonsingular-mass system")
     if args.sample_step and (start + args.sample_step == start or end - args.sample_step == end):
@@ -163,7 +166,7 @@ def configuration(args, system):
     cases = [dict(method=method, controller=controller,
                   filename=method.replace("(", "_").replace(")", "_") + "_" + controller + ".dat")
              for method in methods for controller in dict.fromkeys(args.controllers)
-             if method not in FIXED_IMEX_METHODS or controller == "constant"]
+             if method not in FIXED_IMEX_METHODS + FIXED_BDF_METHODS or controller == "constant"]
     return dict(system=system, backend=args.backend, start_time=start, end_time=end,
                   initial_state=initial, parameters=definition["parameters"], labels=definition["labels"],
                   maximum_steps=args.max_steps, max_relative_error=args.max_relative_error,
@@ -268,7 +271,7 @@ def read_trajectory(path, config, case, sampled=False):
     for key in ("method", "controller"):
         if metadata[key] != case[key]:
             raise ValueError(f"Unexpected {key}")
-    scheme = "imex" if case["method"].startswith("IMEX_") else "dirk"
+    scheme = "bdf" if case["method"] in FIXED_BDF_METHODS else "imex" if case["method"].startswith("IMEX_") else "dirk"
     if metadata.get("scheme", "dirk") != scheme:
         raise ValueError("Unexpected integration scheme")
     if scheme == "imex" and (not config.get("splitting") or metadata.get("splitting") != config["splitting"]):

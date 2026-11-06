@@ -81,6 +81,21 @@ class BenchmarkAssemblyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "singular-mass"):
             runner.configuration(args, "stokes_dae")
 
+    def test_bdf_is_fixed_step_and_supports_all_existing_systems(self):
+        args = self.args("--methods", "BDF1", "BDF2", "SDIRK2(1)2", "--controllers", "constant", "scipy")
+        for system in runner.SYSTEMS:
+            config = runner.configuration(args, system)
+            self.assertEqual([(case["method"], case["controller"]) for case in config["cases"]],
+                             [("BDF1", "constant"), ("BDF2", "constant"),
+                              ("SDIRK2(1)2", "constant"), ("SDIRK2(1)2", "scipy")])
+            self.assertEqual(config["skipped_methods"], [])
+        args = self.args("--methods", "BDF2")
+        with self.assertRaisesRegex(ValueError, "controllers constant"):
+            runner.configuration(args, "lorenz")
+        args = self.args("--methods", "BDF2", "--controllers", "constant", "--sample-step", ".01")
+        with self.assertRaisesRegex(ValueError, "dense sampling"):
+            runner.configuration(args, "lorenz")
+
     def test_constant_step_respects_configured_bounds(self):
         for step in ("1e-10", "1"):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -292,6 +307,16 @@ class BenchmarkDiagnosticsTests(unittest.TestCase):
         self.save()
         with self.assertRaisesRegex(ValueError, "splitting"):
             runner.read_trajectory(self.path, self.config, self.case)
+        self.metadata["scheme"] = "dirk"
+        self.save()
+        with self.assertRaisesRegex(ValueError, "scheme"):
+            runner.read_trajectory(self.path, self.config, self.case)
+
+    def test_bdf_trajectory_has_its_own_scheme(self):
+        self.case.update(method="BDF2", controller="constant")
+        self.metadata.update(method="BDF2", controller="constant", scheme="bdf", dense_output_order=0)
+        self.save()
+        runner.read_trajectory(self.path, self.config, self.case)
         self.metadata["scheme"] = "dirk"
         self.save()
         with self.assertRaisesRegex(ValueError, "scheme"):

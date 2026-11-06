@@ -1,4 +1,5 @@
 #include "ode_benchmark_imex.h"
+#include <nmfd/time_steppers/bdf/implicit_time_step.h>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -163,7 +164,7 @@ struct benchmark_constant_controller : adaptation_type
     }
 };
 
-template <class Equation, class Controller, bool IMEX = false, bool Dense = false>
+template <class Equation, class Controller, bool IMEX = false, bool Dense = false, bool BDF = false>
 int integrate(
     const Equation &equation, const json &config, const std::string &path, const std::string &method,
     const std::string &controller
@@ -174,12 +175,15 @@ int integrate(
     using control_type = std::conditional_t<
         std::is_same_v<Controller, adaptation_type>, benchmark_constant_controller, observed_controller<Controller>>;
     using flow_problem_type = std::conditional_t<IMEX, benchmark_imex_problem<Equation>, problem_type>;
-    using step_type         = std::conditional_t<
-                IMEX,
-                runge_kutta::imex_time_step<
-                    operations_type, flow_problem_type, control_type, typename types::solver_type, Dense>,
-                runge_kutta::implicit_time_step<
-                    operations_type, problem_type, control_type, typename types::solver_type, Dense>>;
+    using rk_step_type      = std::conditional_t<
+             IMEX,
+             runge_kutta::imex_time_step<
+                 operations_type, flow_problem_type, control_type, typename types::solver_type, Dense>,
+             runge_kutta::implicit_time_step<
+                 operations_type, problem_type, control_type, typename types::solver_type, Dense>>;
+    using step_type = std::conditional_t<
+        BDF, bdf::implicit_time_step<operations_type, problem_type, control_type, typename types::solver_type>,
+        rk_step_type>;
     using writer_type =
         std::conditional_t<Dense, dense_trajectory_writer<Equation, step_type>, trajectory_writer<Equation>>;
     const auto &settings   = config.at( "adaptation" );
@@ -240,7 +244,7 @@ int integrate(
     metadata["method"]             = method;
     metadata["controller"]         = controller;
     metadata["backend"]            = backend_name;
-    metadata["scheme"]             = IMEX ? "imex" : "dirk";
+    metadata["scheme"]             = BDF ? "bdf" : IMEX ? "imex" : "dirk";
     metadata["dense_output_order"] = step->dense_output_order();
     if constexpr ( IMEX )
         metadata["splitting"] = config.at( "splitting" );
@@ -305,6 +309,14 @@ int select_controller(
     const std::string &controller
 )
 {
+    if ( method == "BDF1" || method == "BDF2" )
+    {
+        require(
+            controller == "constant" && config.value( "sample_step", 0. ) == 0,
+            "Fixed BDF benchmarks require constant steps without dense sampling"
+        );
+        return integrate<Equation, adaptation_type, false, false, true>( equation, config, path, method, controller );
+    }
     if ( controller == "constant" )
         return select_method<Equation, adaptation_type>( equation, config, path, method, controller );
     if ( controller == "matlab" )

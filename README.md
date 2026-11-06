@@ -273,6 +273,47 @@ Its `implicit_part` supplies the shifted residual/Jacobian and optionally
 forcing. Retain shared model data without a back-pointer to the bundle/application;
 bind solvers once at assembly.
 
+## Fixed-Step BDF
+
+`bdf/implicit_time_step.h` supplies `BDF1` and `BDF2` through the same four
+template dependencies and constructor arguments as implicit RK. Nested `params`
+selects the method (default `BDF2`), maximum attempts and `reference_time`.
+No problem, integrator or nonlinear-solver interface changes are required.
+
+For BDF1, `previous_state()` is `u_n` and `alpha=1/h`. For equal-step BDF2 it is
+`(4*u_n-u_{n-1})/3` and `alpha=3/(2*h)`. `known_rhs()` is zero. The existing
+balanced `set_affine_shift(a,b)` contract applies, including the state-dependent
+mass derivative and unscaled algebraic constraints. No rate or mass inverse is
+required. `get_order()` reports the actual order used by the latest attempt.
+
+BDF2 starts with backward Euler. Only an unchanged full `finalize(accepted,...)`
+promotes history. Failed/rejected candidates and commits never advance it;
+modified/shortened endpoints restart at BDF1. A changed actual step size or
+direction also uses BDF1, then BDF2 resumes when an equal-step pair is available.
+Roundoff-only endpoint clipping does not spuriously lower the order. Discontinuous
+`set_time()` and `reset()` clear history; reset after independent state/model
+changes. As with RK, the caller sets the next starting time after finalization.
+
+Workspace is one backend vector for BDF1 and three for BDF2: candidate, pending
+input and older committed state. It is reused for in-place stepping, retries and
+repeated trajectories. There are no vector-sized host transfers or per-step
+allocations in the engine. This stage has no error estimator or dense output;
+error-requiring controllers return `error_estimate_unavailable`.
+Adaptive BDF1-5 with modified divided-difference history is a separate stage.
+
+Run the serial/OpenMP and CUDA suites with `make test_bdf_cpu` and
+`make test_bdf_cuda`. Separate formula, lifecycle, mass/DAE and backend tests
+cover orders, stiff decay, non-autonomous times, backward integration, endpoint
+modification, rollback, ownership and transfer guards. The DAE cases establish
+capability for the tested formulations, not arbitrary DAE support.
+
+The existing visual runner accepts fixed BDF cases without changing its defaults:
+
+```sh
+bash tests/run_all.sh --methods BDF1 BDF2 --controllers constant \
+  --end 0.4 --step 0.0002
+```
+
 ## IMEX RK
 
 `runge_kutta/imex_time_step.h` executes the fixed IMEX tables and `IMEX_ARK324L2SA` through
