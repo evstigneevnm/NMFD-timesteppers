@@ -487,6 +487,49 @@ make -j2 test_imex_cpu
 make -j2 test_imex_cuda CUDA_ARCH=75
 ```
 
+## Rosenbrock ROS2
+
+`rosenbrock/time_step.h` provides fixed-step ROS2 for autonomous identity-mass
+ODEs. Its separate `rosenbrock/coefficients.h` stores the increment-form
+[ROS2 coefficients](https://kpp.readthedocs.io/en/stable/num_methods/rosenbrock-methods.html#ros-2).
+The primary method is second order and L-stable. Embedding metadata is present,
+but embedded adaptation and dense output are not implemented in this increment.
+
+```cpp
+using step_type = nmfd::time_steppers::rosenbrock::time_step<
+    VectorOperations, Problem, TimeStepAdaptation, LinearSolver>;
+```
+
+Supply shared operations, problem, controller and linear solver handles. Reuse
+the existing shifted-stage problem methods and `bool evaluate_rate(state,rate)`.
+The solver supplies `set_operator(shared_jacobian)` and `bool solve(rhs,out)`;
+no nonlinear solver is constructed, and public Rosenbrock headers do not include
+NMFD-newton or a particular linear solver.
+For each attempt, the engine sets the previous state to its input, zeros the
+known RHS and freezes the exact Jacobian at the base time/state. Both stage
+solves use that same balanced shifted operator; stage-rate calls must preserve
+its prepared data. Changed steps always reprepare/rebind the operator.
+
+The existing apply/finalize/reset and controller interfaces remain unchanged.
+Four backend workspace vectors are allocated once, with no estimator, dense or
+trajectory storage. Failures never publish partial output. Error-requiring
+controllers report `error_estimate_unavailable`; `DenseOutput=true` and
+`params.autonomous=false` reject construction. `reference_time` defaults to one.
+Nontrivial mass, DAEs and approximate-Jacobian W schemes are not supported yet;
+the supplied problem must satisfy the documented identity-mass contract.
+
+```sh
+make -j2 test_rosenbrock_cpu check_headers_cpu
+make -j2 test_rosenbrock_cuda CUDA_ARCH=75
+```
+
+Separate tests cover analytical linear/nonlinear second-order convergence,
+coupled GMRES/direct solves, stiff damping, small/large shifts, stage/rate
+failures, bounded retries, backward steps, modified endpoints, ownership and
+partial-construction cleanup. An 8192-component backend test guards both bulk
+transfer paths and verifies fixed workspace with no allocations after warmup.
+The parent CI also runs Clang, sanitizers and available CUDA/HIP backends.
+
 ## Non-Autonomous Verification
 
 `test_explicit_nonautonomous.cpp` and `test_implicit_nonautonomous.cpp` use shared

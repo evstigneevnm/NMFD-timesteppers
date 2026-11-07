@@ -30,6 +30,8 @@ IMEX_CPU_BINS := $(filter $(BUILD_DIR)/test_implicit_imex_%,$(IMPLICIT_CPU_BINS)
 IMEX_CUDA_BINS := $(filter $(BUILD_DIR)/test_implicit_imex_%,$(IMPLICIT_CUDA_BINS))
 BDF_CPU_BINS := $(filter $(BUILD_DIR)/test_implicit_bdf_%,$(IMPLICIT_CPU_BINS))
 BDF_CUDA_BINS := $(filter $(BUILD_DIR)/test_implicit_bdf_%,$(IMPLICIT_CUDA_BINS))
+ROSENBROCK_CPU_BINS := $(filter $(BUILD_DIR)/test_implicit_rosenbrock%,$(IMPLICIT_CPU_BINS))
+ROSENBROCK_CUDA_BINS := $(filter $(BUILD_DIR)/test_implicit_rosenbrock%,$(IMPLICIT_CUDA_BINS))
 IMPLICIT_INCLUDES := $(INCLUDES) -I$(NMFD_NEWTON_ROOT)/include -I$(NMFD_LINSOLVERS_ROOT)/include
 IMPLICIT_HEADERS := $(wildcard $(NMFD_NEWTON_ROOT)/include/nmfd/solvers/*.h $(NMFD_LINSOLVERS_ROOT)/include/nmfd/solvers/*.h)
 SIMULATION_BINS := $(addprefix $(BUILD_DIR)/test_explicit_lorenz_simulation_,$(addsuffix .bin,cpu cpu_omp cuda))
@@ -39,6 +41,7 @@ BIN_TARGETS := $(notdir $(TABLE_BINS) $(CPU_BINS) $(CUDA_BINS) $(SIMULATION_BINS
 
 .PHONY: check_dependencies test_tables test_cpu test_cuda check_headers_cpu check_headers_cuda format format-check $(BIN_TARGETS)
 .PHONY: check_implicit_dependencies test_implicit_cpu test_implicit_cuda test_imex_cpu test_imex_cuda test_bdf_cpu test_bdf_cuda
+.PHONY: test_rosenbrock_cpu test_rosenbrock_cuda
 $(BIN_TARGETS): %: $(BUILD_DIR)/%
 
 check_dependencies:
@@ -125,6 +128,12 @@ test_bdf_cpu: $(BDF_CPU_BINS)
 
 test_bdf_cuda: $(BDF_CUDA_BINS)
 	@set -e; for test in $(BDF_CUDA_BINS); do "$$test"; done
+
+test_rosenbrock_cpu: $(ROSENBROCK_CPU_BINS)
+	@set -e; for test in $(ROSENBROCK_CPU_BINS); do OMP_NUM_THREADS=$(TEST_OMP_NUM_THREADS) "$$test"; done
+
+test_rosenbrock_cuda: $(ROSENBROCK_CUDA_BINS)
+	@set -e; for test in $(ROSENBROCK_CUDA_BINS); do "$$test"; done
 
 check_headers_cpu: check_dependencies
 	@set -e; for header in $(PUBLIC_HEADERS); do \
