@@ -345,7 +345,7 @@ int select_method(
             );
         }
         else
-            throw std::invalid_argument( "Rosenbrock benchmarks support identity-mass ODEs only" );
+            throw std::invalid_argument( "Rosenbrock benchmark requires a validated rate/Jacobian formulation" );
     }
     if ( method == "BDF1" || method == "BDF2" || method == "BDF" )
     {

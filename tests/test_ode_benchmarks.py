@@ -105,7 +105,7 @@ class BenchmarkAssemblyTests(unittest.TestCase):
             self.assertEqual(config["sample_step"], .017)
             self.assertEqual(len(config["cases"]), 5)
 
-    def test_rosenbrock_selects_only_identity_mass_systems_and_supports_dense_sampling(self):
+    def test_rosenbrock_selects_validated_rate_systems_and_supports_dense_sampling(self):
         args = self.args("--methods", "ROS2", "ROS3", "ROS34PW2", "--controllers", "constant", "scipy", "--sample-step", ".017")
         for system in runner.ROSENBROCK_SYSTEMS:
             config = runner.configuration(args, system)
@@ -113,12 +113,20 @@ class BenchmarkAssemblyTests(unittest.TestCase):
             self.assertEqual(len(config["cases"]), 6)
             self.assertEqual(config["skipped_methods"], [])
         for system in set(runner.SYSTEMS) - set(runner.ROSENBROCK_SYSTEMS):
-            with self.assertRaisesRegex(ValueError, "identity-mass"):
+            with self.assertRaisesRegex(ValueError, "rate/Jacobian"):
                 runner.configuration(args, system)
         mixed = self.args("--methods", "BDF2", "ROS3")
-        config = runner.configuration(mixed, "state_mass")
+        config = runner.configuration(mixed, "coupled_mass")
         self.assertEqual(config["skipped_methods"], ["ROS3"])
         self.assertTrue(all(case["method"] == "BDF2" for case in config["cases"]))
+
+    def test_rosenbrock_variable_mass_uses_existing_runner(self):
+        for system in ("state_mass", "time_mass"):
+            args = self.args("--system", system, "--methods", "ROS2", "ROS3", "ROS34PW2",
+                             "--controllers", "constant", "scipy", "--sample-step", ".017")
+            config = runner.configuration(args, system)
+            self.assertEqual(len(config["cases"]), 6)
+            self.assertEqual(config["skipped_methods"], [])
 
     def test_constant_step_respects_configured_bounds(self):
         for step in ("1e-10", "1"):

@@ -1,5 +1,6 @@
 #include "implicit_rosenbrock_mass_time_problem.h"
 #include "implicit_rosenbrock_dae_problem.h"
+#include "implicit_rosenbrock_variable_mass_problem.h"
 #include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
@@ -280,6 +281,20 @@ try
         }
     }
     check( mass->residuals > 0, "Mass-form transfer guard did not exercise residual stages" );
+    auto variable   = std::make_shared<variable_mass_problem<coupled_variable_mass_model, space>>( ops );
+    auto state_mass = std::make_shared<variable_mass_problem<state_mass_rate_model, space>>( ops );
+    for ( const char *method : { "ROS2", "ROS3", "ROS34PW2" } )
+    {
+        variable->model.factor = std::string( method ) == "ROS34PW2" ? .5 : 1;
+        adaptive_mode( variable, true, method, std::false_type{} );
+        adaptive_mode( variable, true, method, std::true_type{} );
+        adaptive_mode( state_mass, false, method, std::false_type{} );
+        adaptive_mode( state_mass, false, method, std::true_type{} );
+    }
+    check(
+        variable->rates > 0 && variable->derivatives > 0 && variable->residuals == 0,
+        "Variable-mass guard did not exercise problem-owned rates/derivatives"
+    );
     auto dae_mode = [&]( auto adaptive ) {
         using Problem = dae_problem<space>;
         using Linear  = krylov_solver<Problem, space>;

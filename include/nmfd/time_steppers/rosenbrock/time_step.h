@@ -20,7 +20,8 @@
 
 namespace nmfd::time_steppers::rosenbrock
 {
-// Identity-rate ODEs or opt-in constant-mass residuals. Only W
+// Physical-rate ODEs (including problem-owned nonsingular mass solves) or
+// opt-in constant-mass residuals. Only W
 // tables permit approximate Jacobians. Evaluations preserve the frozen operator.
 template <class VectorOperations, class Problem, class TimeStepAdaptation, class LinearSolver, bool DenseOutput = false>
 class time_step

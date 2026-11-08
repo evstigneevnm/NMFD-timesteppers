@@ -489,8 +489,8 @@ make -j2 test_imex_cuda CUDA_ARCH=75
 
 ## Rosenbrock ROS2/ROS3
 
-`rosenbrock/time_step.h` provides fixed/adaptive ROS2 and ROS3 for identity-mass
-ODEs. Its separate `rosenbrock/coefficients.h` stores the increment-form
+`rosenbrock/time_step.h` provides fixed/adaptive ROS2 and ROS3 for physical-rate
+ODEs, including problem-owned nonsingular mass solves. Its separate `rosenbrock/coefficients.h` stores the increment-form
 [ROS2 coefficients](https://kpp.readthedocs.io/en/stable/num_methods/rosenbrock-methods.html#ros-2).
 Select `params.method="ROS2"` (default, order 2/1) or `"ROS3"` (order 3/2).
 Both are L-stable. ROS3 uses the full-precision constants from
@@ -575,8 +575,8 @@ evaluations or solves.
 Classical interpolation order is not a claim of stiffness-uniform accuracy or
 positivity in unresolved initial layers. See the [derivation and limits](docs/rosenbrock_dense_output.md).
 
-The ODE validation runner accepts both methods for identity-mass systems, without
-changing its default method matrix or enabling unsupported mass/DAE cases:
+The ODE validation runner accepts both methods for the supported rate systems,
+including `state_mass` and `time_mass`, without changing its default method matrix:
 
 ```sh
 bash tests/run_all.sh --systems lorenz rossler vdp vdp_stiff time_coefficient stiff_tracking \
@@ -618,12 +618,13 @@ zero/perturbed/lagged approximations, all controllers, non-autonomous backward
 integration, fourth-stage failures, retry shifts and modified commits. They run
 through the existing Rosenbrock CPU/OpenMP/CUDA targets and parent CI.
 The visual runner accepts `--methods ROS34PW2 --sample-step 0.017` for the
-same six identity-mass systems as ROS2/ROS3; default method selections are unchanged.
+same rate systems as ROS2/ROS3, including state/time mass; default method selections are unchanged.
 Separate dense tests check all eight independent W conditions, interior orders,
 bounded stiff samples, exact endpoints, failed slope/rate preparation and view
 expiry. Classical continuous order does not certify stiffness-uniform accuracy
 or positivity in unresolved layers. Singular mass requires the separate index-1
-selection below; time- or state-dependent mass remains unsupported.
+selection below. Time/state-dependent nonsingular mass requires a normalized rate
+problem, not the native constant-mass residual formula.
 
 ### Constant-Mass Residual Form
 
@@ -691,6 +692,44 @@ after warmup. Engine cost is unchanged: four residuals/shifted solves and six
 retained backend vectors, independent of vector dimension. Constraint-policy and
 linear-solver costs remain application-owned. Parent CI includes CPU/OpenMP,
 Clang, sanitizers and available CUDA/HIP backends.
+
+### Variable Nonsingular Mass: Rate Form
+
+For `M(t,u)*u'=f(t,u)` with invertible M, use the default `mass_form=false`:
+the problem's existing `evaluate_rate()` solves `M*q=f`. Supply the shifted
+rate operator `a*I-b*Bq`, not the physical-mass stage Jacobian. For exact
+ROS2/ROS3 linearization and non-autonomous execution the required derivatives are
+
+```text
+M*Dq[v] = Df[v] - (DM[v])*q,
+M*q_t   = f_t - M_t*q.           // partial time derivative, state held fixed
+```
+
+Only ROS34PW2 permits an admissible approximation to Dq. Mass solves and
+derivative actions remain problem-owned, as do their tolerances and scratch.
+Assembly may share physical model data between an ordinary DIRK/BDF problem and
+a normalized Rosenbrock rate facade; their shifted Jacobians are not interchangeable.
+No new callbacks, settings or engine algorithms/storage are needed.
+
+Existing adaptation, dense output and rollback apply unchanged to this ODE
+formulation. A failed mass solve returns false; invalid rates are rejected.
+Keep prepared operators frozen during rate/time evaluations and maintain linear
+Jv actions during each Krylov solve. This does not extend `mass_form=true` to
+variable M or support variable singular-mass DAEs. See the
+[derivative contract and cost](docs/rosenbrock_mass.md#variable-nonsingular-mass-rate-form).
+
+Separate tests cover `(1+u^2)*u'=-u`, `(1+t)*u'=-u`, and coupled time/state
+mass with an exponential manufactured solution. They verify finite-difference
+derivatives (and intentionally omitted mass terms), primary/dense orders,
+backward steps, W approximations, adaptive refinement, restart, failed providers
+and shifted solves, plus guarded 8192-component execution. Parent CI runs them
+on CPU/OpenMP, Clang, sanitizers and available CUDA/HIP. The visual runner uses
+the existing state-mass decay and time-mass systems, with unchanged equations:
+
+```sh
+bash tests/run_all.sh --systems state_mass time_mass --methods ROS2 ROS3 ROS34PW2 \
+  --controllers scipy --start 0.25 --end 0.65 --sample-step 0.017
+```
 
 ## Non-Autonomous Verification
 

@@ -19,7 +19,8 @@ DEFAULT_METHODS = ("SDIRK2(1)2", "SDIRK3(1)3", "IMEX_ARK324L2SA")
 FIXED_IMEX_METHODS = ("IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233")
 BDF_METHODS = ("BDF1", "BDF2", "BDF")
 ROSENBROCK_METHODS = ("ROS2", "ROS3", "ROS34PW2")
-ROSENBROCK_SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "time_coefficient", "stiff_tracking")
+ROSENBROCK_SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "time_coefficient", "stiff_tracking",
+                      "state_mass", "time_mass")
 METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS + BDF_METHODS + ROSENBROCK_METHODS
 SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "coupled_mass", "state_mass",
            "time_mass", "coupled_dae", "moving_dae", "stokes_dae", "time_coefficient", "stiff_tracking")
@@ -160,7 +161,7 @@ def configuration(args, system):
                and (method not in ROSENBROCK_METHODS or system in ROSENBROCK_SYSTEMS)]
     if not methods:
         raise ValueError(f"{system}: no compatible methods; IMEX excludes singular-mass DAEs; "
-                         "Rosenbrock requires identity-mass ODEs")
+                         "Rosenbrock requires a validated rate/Jacobian formulation")
     if any(method in FIXED_IMEX_METHODS for method in methods) and "constant" not in args.controllers:
         raise ValueError("Fixed IMEX tables require --controllers constant (no combined embedded estimator)")
     if "BDF" in methods and not any(controller != "constant" for controller in args.controllers):

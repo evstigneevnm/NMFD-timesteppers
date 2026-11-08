@@ -177,9 +177,59 @@ linear/preconditioner costs depend on the formulation.
 
 ## Capability Limits
 
-State/time-dependent mass, non-autonomous singular-mass DAEs, higher-index
-systems, index reduction and DAE dense output are outside this capability.
+State/time-dependent mass in the native residual path, non-autonomous singular-mass
+DAEs, higher-index systems, index reduction and DAE dense output are outside this capability.
 The q_t contract used above for nonsingular mass does not encode general moving
 algebraic constraints. No claim is inferred from a successful
 shifted solve, and the engine cannot detect these properties of an arbitrary
 matrix-free problem. Callers must satisfy the documented constant-mass contract.
+
+## Variable Nonsingular Mass: Rate Form
+
+For invertible M(t,u), rewrite the physical equation as u'=q(t,u), where the
+existing `evaluate_rate()` solves M*q=f. Select the existing default
+`mass_form=false`; do not insert variable M into the native constant-mass
+stage formula. The problem still supplies the same method signatures and
+reference buffers, but its prepared shifted operator is a*I-b*Bq.
+The underlying ODE reduction is also described in
+[MATLAB's mass-matrix documentation](https://www.mathworks.com/help/matlab/ref/odemassmatrix.html).
+
+Differentiating M*q=f at fixed time gives
+
+    M*Dq[v] = Df[v] - (D_u M[v])*q.
+
+At fixed state, the partial time derivative satisfies
+
+    M*q_t = f_t - (partial_t M)*q.
+
+These are mass solves, not explicit inverses. ROS2/ROS3 require the exact rate
+Jacobian; ROS34PW2 may use its admissible W approximation. The physical rate
+and q_t are not approximated merely because Bq is approximate. A full implicit
+physical residual a*M*(u-previous)-b*f has a different Jacobian; it cannot be
+passed unchanged to rate-form Rosenbrock. Use a problem-owned normalized facade
+sharing physical model data with the ordinary DIRK/BDF problem where appropriate.
+No additional required callbacks or engine mode is introduced.
+
+All existing transformed stages, embedded estimates and ODE dense extensions
+then apply to q. Recompute the problem-owned mass solve at each consumed stage
+state/time. Freeze the prepared operator at the attempt's base point; partial
+derivative and trial rate evaluations must preserve it. With iterative mass or
+derivative solves, choose tolerances consistent with integration accuracy and
+preserve linear/deterministic Jv actions on the frozen Krylov problem. Neither
+stability for arbitrary approximations nor general DAE applicability is implied.
+
+A failed rate/mass solve returns false, nonfinite results follow bounded
+rejection, and exceptions propagate without publishing a candidate. Rejections,
+reset and modified endpoints reprepare through the existing lifecycle.
+Singular variable mass requires a separately justified formulation/method; this
+rate reduction is not applicable.
+
+There are no extra engine vectors, callbacks or per-attempt allocations relative
+to ordinary rate execution. Each rate, q_t or Jv may now cost a problem-owned
+mass solve. Its solver/preconditioner storage and cost are additional and must
+be measured by the application. Backend work/storage remain bounded O(N) for
+the block-local examples; no general O(N) complexity claim is made for an
+arbitrary global mass solve. The 8192-component guard exercises fixed-workspace
+adaptive/dense runs with exact and approximate rate Jacobians and refuses bulk
+host/device transfers. The visual benchmark facade is restricted to its two
+validated scalar mass equations; it does not silently normalize arbitrary problems.
