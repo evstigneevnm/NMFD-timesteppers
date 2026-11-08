@@ -36,6 +36,7 @@ public:
         scalar_type  reference_time   = scalar_type( 1 );
         bool         autonomous       = true;
         bool         mass_form        = false;
+        bool         index1_dae       = false;
     };
 
     static_assert(
@@ -64,6 +65,13 @@ public:
     {
         if ( !p.maximum_attempts )
             throw std::invalid_argument( "Rosenbrock requires a nonempty attempt budget" );
+        if ( p.index1_dae )
+        {
+            if ( !p.mass_form || !p.autonomous || !table_.supports_constant_mass_index1() )
+                throw std::invalid_argument( "Index-1 Rosenbrock requires autonomous ROS34PW2 mass form" );
+            if constexpr ( DenseOutput )
+                throw std::invalid_argument( "Index-1 Rosenbrock dense output is not validated" );
+        }
         if ( !p.mass_form && !detail::has_rate_evaluation<Problem, vector_type>::value )
             throw std::invalid_argument( "Rate-form Rosenbrock requires bool evaluate_rate(state, rate)" );
         if constexpr ( DenseOutput )
@@ -391,6 +399,8 @@ private:
 
     // For R(U)=a*M*(U-previous)-b*f(U), previous=U+sum(q_j*y_j)
     // gives -R=b*f(U)+a*M*sum(q_j*y_j), without a mass inverse or action API.
+    // Index-1 problems keep algebraic residual/Jacobian rows unscaled; the
+    // reference coupling affects only differential rows. No projection is inferred.
     // apply() must not change the operator prepared at the attempt's base state.
     bool residual_rhs(
         const vector_type &state, const std::array<double, 4> &coupling, scalar_type stage_time,

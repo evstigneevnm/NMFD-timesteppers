@@ -1,4 +1,5 @@
 #include "implicit_rosenbrock_mass_time_problem.h"
+#include "implicit_rosenbrock_dae_problem.h"
 #include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
@@ -279,6 +280,69 @@ try
         }
     }
     check( mass->residuals > 0, "Mass-form transfer guard did not exercise residual stages" );
+    auto dae_mode = [&]( auto adaptive ) {
+        using Problem = dae_problem<space>;
+        using Linear  = krylov_solver<Problem, space>;
+        using Base    = integration::time_step_adaptation_scipy<space>;
+        using Control = std::conditional_t<decltype( adaptive )::value, dae_control<Base, Problem>, C>;
+        using Step    = rosenbrock::time_step<space, Problem, Control, Linear>;
+        auto p        = std::make_shared<Problem>( ops );
+        p->factor     = .5;
+        auto solver   = make_krylov<Linear>( ops );
+        auto control  = [&] {
+            if constexpr ( adaptive )
+            {
+                typename Base::params cp;
+                cp.relative_tolerance = cp.absolute_tolerance = 1e-4;
+                cp.initial_step = cp.maximum_step = .02;
+                auto checked                      = std::make_shared<Control>( p, cp );
+                checked->constraint_tolerance     = 1e-7;
+                return checked;
+            }
+            else
+                return std::make_shared<Control>( typename Control::params{ .02 } );
+        }();
+        const auto baseline = guarded_memory::allocations.size();
+        for ( unsigned int i = 1; i <= 6; ++i )
+        {
+            ops->fail_activation = ops->activations + i;
+            bool failed          = false;
+            try
+            {
+                Step invalid( ops, p, control, solver, dae_params<Step>() );
+            }
+            catch ( const std::runtime_error & )
+            {
+                failed = true;
+            }
+            check(
+                failed && guarded_memory::allocations.size() == baseline, "Partial DAE construction leaked workspace"
+            );
+        }
+        ops->fail_activation = 0;
+        Step step( ops, p, control, solver, dae_params<Step>() );
+        check( guarded_memory::allocations.size() == baseline + 6, "Index-1 mode allocated additional engine vectors" );
+        ops->assign_scalar( 1., *state );
+        step.set_target_time( .02 );
+        step.apply( *state, *out );
+        check( step.get_status() == single_step_status::converged, "Guarded DAE warmup failed" );
+        step.finalize( adaptation_status::accepted, step.get_dt(), *out );
+        const auto allocated = guarded_memory::allocation_count;
+        for ( unsigned int repeat = 0; repeat < 3; ++repeat )
+        {
+            step.reset();
+            step.apply( *state, *out );
+            check( step.get_status() == single_step_status::converged, "Guarded DAE repeated solve failed" );
+            check(
+                p->constraint_norm( *out, p->known_rhs() ) < ( adaptive ? 1e-7 : 1e-4 ),
+                "Guarded DAE constraint defect is unbounded"
+            );
+            step.finalize( adaptation_status::accepted, step.get_dt(), *out );
+        }
+        check( allocated == guarded_memory::allocation_count, "Index-1 solve allocated workspace after warmup" );
+    };
+    dae_mode( std::false_type{} );
+    dae_mode( std::true_type{} );
     check( time->derivatives > 0 && time->time == .37, "Guarded ROS2 omitted f_t or changed base time" );
     std::cout
         << "Fixed/adaptive/non-autonomous ROS2/ROS3/ROS34PW2, fixed workspace and blocked vector-sized host transfers: "

@@ -4,7 +4,8 @@ The optional `params.mass_form=true` path supports equations
 
     M*u' = f(t,u),
 
-with constant nonsingular M. Identity-rate execution remains the default.
+with constant nonsingular M, or the bounded index-1 selection below.
+Identity-rate execution remains the default.
 ROS2/ROS3 use B=J_f; ROS34PW2 may use its validated approximate B. No existing
 method signature changes. No rate, force, or mass-action callback is added.
 
@@ -120,9 +121,65 @@ state-sized cancellation when q is tiny relative to U. Balanced equations avoid
 floor. Tests compare mass/rate forms over signed small/large steps, mass scales
 and reference times; agreement is numerical, not bitwise equivalence.
 
+## Index-1 DAEs
+
+Set `method="ROS34PW2"`, `mass_form=true`, `index1_dae=true` for autonomous
+constant-singular-mass index-1 problems. This table is an index-1 scheme, not
+an inference from its ODE order; see the original
+[Rang/Angermann discussion, section 1](https://dml.cz/bitstream/handle/10338.dmlcz/700435/Equadiff_11-2005-2_46.pdf)
+and [PETSc's RA34PW2 description](https://petsc.org/main/manualpages/TS/TSROSWRA34PW2/).
+The selection rejects ROS2/ROS3, non-autonomous operation and enabled dense output.
+The engine cannot detect the DAE index or singularity of an arbitrary operator;
+the caller explicitly declares this capability and must satisfy its contract.
+
+For a semi-explicit index-1 system with constant differential mass Md,
+
+    Md*x' = f(x,z), 0 = g(x,z), g_z invertible,
+
+keep residual/Jacobian constraint rows unscaled:
+
+    R(U) = [ a*Md*(x-previous_x)-b*f(x,z) ; g(x,z) ],
+    L    = [ a*Md-b*B_x  -b*B_z ; g_x  g_z ].
+
+The exact algebraic derivative rows are frozen at the base state. Differential
+rows may use the admissible W approximation. With
+`previous=U_i+gamma*sum_j C_ij*y_j`, the same existing residual call gives
+
+    L*y_i = [ b*f(U_i)+a*Md*gamma*sum_j C_ij*y_j^x ; -g(U_i) ].
+
+Thus every stage solves the full differential/algebraic system; no singular
+mass inverse, algebraic-rate reconstruction or new problem callback is needed.
+This is a row-scaled form of the constant-mass Rosenbrock stages. The coupling
+reference enters only differential rows. Scaling algebraic rows by b instead
+would weaken their residual interpretation and is not this capability's contract.
+
+The regression checks the third-order algebraic condition
+`b_RK^T*(A+Gamma)^-1*c^2=1`; in our increment coordinates it is
+`m^T*(I+a_table)^-1*c^2=1`. It also verifies differential/algebraic refinement
+and the embedded local estimate separately on linear and nonlinear constraints.
+These finite-dimensional examples do not establish stiffness-uniform accuracy
+for every PDAE or justify arbitrary algebraic Jacobian approximations.
+
+Initial consistency and consistency after external endpoint changes remain
+problem-owned. Check unscaled g independently of the embedded state defect,
+through the existing controller or external-manager boundary before commitment.
+The DAE tests show one such controller composition with separate tolerances,
+initial-data refusal and bounded constraint-driven retries. It is not an
+additional required timestepper interface. For nonlinear g, the numerical
+endpoint can have a nonzero O(h^3) constraint defect; no exact projection is
+implied by a successful stage solve.
+
+Retained engine storage/work and failure publication rules are unchanged:
+six backend vectors, four residuals/linear solves, no per-attempt allocation
+or vector-sized host/device transfer. A supplied constraint policy owns its
+own bounded backend scratch and scalar reductions. Constraint checks and
+linear/preconditioner costs depend on the formulation.
+
 ## Capability Limits
 
-State/time-dependent and singular mass, DAEs, index reduction and constrained
-dense samples are outside this capability. No claim is inferred from a successful
+State/time-dependent mass, non-autonomous singular-mass DAEs, higher-index
+systems, index reduction and DAE dense output are outside this capability.
+The q_t contract used above for nonsingular mass does not encode general moving
+algebraic constraints. No claim is inferred from a successful
 shifted solve, and the engine cannot detect these properties of an arbitrary
 matrix-free problem. Callers must satisfy the documented constant-mass contract.

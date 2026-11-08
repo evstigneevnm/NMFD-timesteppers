@@ -42,7 +42,7 @@ class method_table
         std::array<double, 4> m, e, time, time_derivative;
         std::array<bool, 4>   reuse;
         unsigned int          dense_order;
-        bool                  approximate_jacobian;
+        bool                  approximate_jacobian, constant_mass_index1;
     };
     const data data_;
 
@@ -64,6 +64,7 @@ class method_table
                 { p.gamma1, p.gamma2, 0 },
                 { false, false, false },
                 2,
+                false,
                 false
             };
         }
@@ -86,6 +87,7 @@ class method_table
                 { g, 0.24291996454816804366592249683314, 0.21851380027664058511513169485832e1 },
                 { false, false, true },
                 3,
+                false,
                 false
             };
         }
@@ -115,6 +117,7 @@ class method_table
                 { .435866521508459, -.43586652150845901, -.413333376233886494, 0 },
                 { false, false, false, false },
                 3,
+                true,
                 true
             };
         }
@@ -163,6 +166,12 @@ public:
     bool supports_approximate_jacobian() const
     {
         return data_.approximate_jacobian;
+    }
+    // RA34PW2 is an index-1 scheme; ODE orders alone do not certify DAEs.
+    // https://petsc.org/main/manualpages/TS/TSROSWRA34PW2/
+    bool supports_constant_mass_index1() const
+    {
+        return data_.constant_mass_index1;
     }
     double a( std::size_t i, std::size_t j ) const
     {

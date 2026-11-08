@@ -527,7 +527,7 @@ without the extended error-assessment signature report `error_estimate_unavailab
 `reference_time` defaults to one.
 The default rate path requires the documented identity-rate shifted operator.
 For constant nonsingular mass, select the residual form below.
-DAEs are not supported. ROS2/ROS3 retain the exact-Jacobian
+ROS2/ROS3 do not advertise DAE support and retain the exact-Jacobian
 requirement. The separately selected W-method below permits approximations.
 
 Autonomous problems need no additional method or storage. With
@@ -622,8 +622,8 @@ same six identity-mass systems as ROS2/ROS3; default method selections are uncha
 Separate dense tests check all eight independent W conditions, interior orders,
 bounded stiff samples, exact endpoints, failed slope/rate preparation and view
 expiry. Classical continuous order does not certify stiffness-uniform accuracy
-or positivity in unresolved layers. Singular/time- or state-dependent mass
-remains unsupported.
+or positivity in unresolved layers. Singular mass requires the separate index-1
+selection below; time- or state-dependent mass remains unsupported.
 
 ### Constant-Mass Residual Form
 
@@ -651,8 +651,46 @@ for q=M^{-1}f, not f_t or a total derivative. Constant M gives M*q_t=f_t;
 the reference buffer encodes the correctly mass-weighted time correction.
 Use the existing single additional q_t vector, with one evaluation per attempt.
 Stage and dense endpoint evaluations restore base time and preserve the frozen
-operator. `evaluate_rate` remains unnecessary. Singular and variable mass are
-not validated capabilities, even if their shifted operators happen to solve.
+operator. `evaluate_rate` remains unnecessary. Singular mass uses the bounded
+index-1 selection below; variable mass is not validated merely by a shifted solve.
+
+### Autonomous Constant-Mass Index-1 DAEs
+
+Select `params.method="ROS34PW2"`, `params.mass_form=true` and
+`params.index1_dae=true` for a constant singular mass with a regular index-1
+algebraic block. Defaults and existing method signatures are unchanged.
+`table().supports_constant_mass_index1()` reports table applicability.
+ROS2/ROS3, non-autonomous execution and `DenseOutput=true` reject this selection
+at construction; general moving constraints and higher-index DAEs are not inferred.
+
+Supply the existing residual and frozen full-system Jacobian, for example
+
+```text
+R(U) = [ a*Md*(x-previous_x)-b*(f(x,z)+known_rhs_x) ; g(x,z) ],
+L    = [ a*Md-b*Bx  -b*Bz ; gx  gz ].
+```
+
+Keep algebraic equations and their Jacobian rows unscaled, with an invertible
+`gz`. Approximation is limited here to differential Jacobian rows; preserve
+the exact constraint derivatives. Solve this complete shifted system, never the
+singular mass. No rate, mass-action, initialization or constraint callback is
+added to the timestepper. See [stage derivation and limitations](docs/rosenbrock_mass.md#index-1-daes).
+
+Consistent initialization and externally modified endpoints remain problem-owned.
+The embedded state defect does not certify constraints: enforce an independent
+unscaled constraint tolerance using the existing controller/external-manager
+boundary. Nonlinear constraints need not vanish exactly, and no projection is
+silently performed. A failed constraint check must reject before commitment.
+
+Separate DAE accuracy/lifecycle tests cover `z=x` and `z=x*x`, independent
+differential/algebraic refinement, approximate differential Jacobians, embedded
+estimates, backward steps, all controller presets, inconsistent initialization,
+constraint rejection, rollback and restart. The 8192-component GMRES guard
+checks fixed/adaptive execution without bulk host/device transfers or allocations
+after warmup. Engine cost is unchanged: four residuals/shifted solves and six
+retained backend vectors, independent of vector dimension. Constraint-policy and
+linear-solver costs remain application-owned. Parent CI includes CPU/OpenMP,
+Clang, sanitizers and available CUDA/HIP backends.
 
 ## Non-Autonomous Verification
 
