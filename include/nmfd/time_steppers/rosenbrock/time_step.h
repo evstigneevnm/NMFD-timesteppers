@@ -19,8 +19,8 @@
 
 namespace nmfd::time_steppers::rosenbrock
 {
-// Identity-mass ODEs with an exact base Jacobian. Rate/time-derivative
-// evaluations must preserve the prepared shifted operator.
+// Identity-mass ODEs. Only W tables permit approximate base Jacobians.
+// Rate/time-derivative evaluations must preserve the prepared shifted operator.
 template <class VectorOperations, class Problem, class TimeStepAdaptation, class LinearSolver, bool DenseOutput = false>
 class time_step
 {
@@ -63,6 +63,9 @@ public:
     {
         if ( !p.maximum_attempts )
             throw std::invalid_argument( "Rosenbrock requires a nonempty attempt budget" );
+        if constexpr ( DenseOutput )
+            if ( !table_.dense_output_order() )
+                throw std::invalid_argument( "Selected Rosenbrock method has no validated dense output" );
         if ( !p.autonomous && !detail::has_time_derivative_evaluation<Problem, vector_type>::value )
             throw std::invalid_argument(
                 "Non-autonomous Rosenbrock requires bool evaluate_time_derivative(state, out)"
@@ -130,7 +133,7 @@ public:
     }
     unsigned int dense_output_order() const
     {
-        return DenseOutput ? table_.order() : 0;
+        return DenseOutput ? table_.dense_output_order() : 0;
     }
 
     // Borrow only the pending numerical step; the owner must outlive the view.

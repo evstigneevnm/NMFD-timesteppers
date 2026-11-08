@@ -38,8 +38,11 @@ class method_table
     {
         unsigned int          stages, order, embedded_order;
         double                gamma;
-        std::array<double, 3> a, c, m, e, time, time_derivative;
-        std::array<bool, 3>   reuse;
+        std::array<double, 6> a, c;
+        std::array<double, 4> m, e, time, time_derivative;
+        std::array<bool, 4>   reuse;
+        unsigned int          dense_order;
+        bool                  approximate_jacobian;
     };
     const data data_;
 
@@ -59,7 +62,9 @@ class method_table
                 { p.e1, p.e2, 0 },
                 { 0, 1, 0 },
                 { p.gamma1, p.gamma2, 0 },
-                { false, false, false }
+                { false, false, false },
+                2,
+                false
             };
         }
         if ( method == "ROS3" )
@@ -79,7 +84,38 @@ class method_table
                 { .5, -0.29079558716805469821718236208017e1, 0.22354069897811569627360909276199 },
                 { 0, g, g },
                 { g, 0.24291996454816804366592249683314, 0.21851380027664058511513169485832e1 },
-                { false, false, true }
+                { false, false, true },
+                3,
+                false
+            };
+        }
+        if ( method == "ROS34PW2" )
+        {
+            // Rang/Angermann RA34PW2, as tabulated in PETSc's rosw.c:
+            // https://petsc.org/main/src/ts/impls/rosw/rosw.c.html
+            // Convert once offline: a=A*Gamma^-1, c=-lower(Gamma^-1),
+            // m=b^T*Gamma^-1, e=(b-bhat)^T*Gamma^-1. Stage times and
+            // f_t weights are the row sums of the original A and Gamma.
+            return {
+                4,
+                3,
+                2,
+                .435866521508459,
+                { 2, 1.419217317455764650002648964852719, -.2592322116729697137830264607535575,
+                  4.184760482319160731154865710549846, -.2851920173554959137014835526287717,
+                  2.294280360279041716748138882049989 },
+                { -4.588560720558083486133501479721273, -4.184760482319160731154865710549846,
+                  .2851920173554959137014835526287717, -6.368179200128357763538327614748235,
+                  -6.795620944466836184391369586498675, 2.870098604331056089209571124574071 },
+                { 4.184760482319160145288398185867343, -.2851920173554958737746011228593438,
+                  2.294280360279041395548888442984149, 1 },
+                { .2777499476479681103770681569531932, -1.403239895175999024215416205098263,
+                  1.772630127667550745234421928975938, .5 },
+                { 0, .87173304301691801, .73157995778885238, 1 },
+                { .435866521508459, -.43586652150845901, -.413333376233886494, 0 },
+                { false, false, false, false },
+                0,
+                true
             };
         }
         throw std::invalid_argument( "Unknown Rosenbrock method: " + method );
@@ -90,7 +126,7 @@ class method_table
         if ( i >= data_.stages )
             throw std::out_of_range( "Rosenbrock stage index" );
     }
-    double lower( const std::array<double, 3> &values, std::size_t i, std::size_t j ) const
+    double lower( const std::array<double, 6> &values, std::size_t i, std::size_t j ) const
     {
         require_stage( i );
         require_stage( j );
@@ -119,6 +155,14 @@ public:
     unsigned int error_order() const
     {
         return data_.embedded_order + 1;
+    }
+    unsigned int dense_output_order() const
+    {
+        return data_.dense_order;
+    }
+    bool supports_approximate_jacobian() const
+    {
+        return data_.approximate_jacobian;
     }
     double a( std::size_t i, std::size_t j ) const
     {

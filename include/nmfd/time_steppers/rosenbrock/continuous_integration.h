@@ -19,6 +19,8 @@ std::array<T, 4> continuous_weights( const method_table &table, T theta )
 {
     if ( !std::isfinite( theta ) || theta < 0 || theta > 1 )
         throw std::invalid_argument( "Dense-output theta must be in [0,1]" );
+    if ( !table.dense_output_order() )
+        throw std::invalid_argument( "Selected Rosenbrock method has no validated dense output" );
     std::array<T, 4> weights{};
     const T          factor = theta * ( 1 - theta );
     if ( table.stage_count() == 2 )

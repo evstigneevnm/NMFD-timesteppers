@@ -1,4 +1,4 @@
-#include "implicit_rosenbrock_time_problem.h"
+#include "implicit_rosenbrock_w_problem.h"
 #include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
@@ -112,7 +112,7 @@ try
         blocked = true;
     }
     check( blocked, "ROS2 raw download guard is disconnected" );
-    for ( const char *method : { "ROS2", "ROS3" } )
+    for ( const char *method : { "ROS2", "ROS3", "ROS34PW2" } )
     {
         const rosenbrock::method_table table( method );
         const auto                     workspace = table.stage_count() + 2;
@@ -156,9 +156,13 @@ try
             }
             check( allocations == guarded_memory::allocation_count, "ROS2 allocated backend vectors after warmup" );
             const double g = table.gamma, z = -.02;
-            const double exact = table.order() == 2 ? ( 1 + ( 1 - 2 * g ) * z ) / std::pow( 1 - g * z, 2 )
-                                                    : ( 1 + ( 1 - 3 * g ) * z + ( .5 - 3 * g + 3 * g * g ) * z * z ) /
-                                                          std::pow( 1 - g * z, 3 );
+            const double exact =
+                table.order() == 2 ? ( 1 + ( 1 - 2 * g ) * z ) / std::pow( 1 - g * z, 2 )
+                : table.stage_count() == 3
+                    ? ( 1 + ( 1 - 3 * g ) * z + ( .5 - 3 * g + 3 * g * g ) * z * z ) / std::pow( 1 - g * z, 3 )
+                    : ( 1 + ( 1 - 4 * g ) * z + ( .5 - 4 * g + 6 * g * g ) * z * z +
+                        ( 1. / 6 - 2 * g + 6 * g * g - 4 * g * g * g ) * z * z * z ) /
+                          std::pow( 1 - g * z, 4 );
             ops->add_mul_scalar( -exact, 1., *out );
             check( ops->norm( *out ) < 1e-10, "Matrix-free ROS2 output disagrees with its stability function" );
         }
@@ -241,9 +245,30 @@ try
         adaptive_mode( p, false, method, std::true_type{} );
         adaptive_mode( time, true, method, std::true_type{} );
     }
+    auto approximate          = std::make_shared<w_problem<decay, space>>( ops );
+    approximate->model.factor = .3;
+    auto approximate_time     = std::make_shared<w_time_problem<space>>( ops );
+    adaptive_mode( approximate, false, "ROS34PW2", std::false_type{} );
+    adaptive_mode( approximate_time, true, "ROS34PW2", std::false_type{} );
+    const auto before      = guarded_memory::allocations.size();
+    bool       unsupported = false;
+    try
+    {
+        using Dense = rosenbrock::time_step<space, P, C, L, true>;
+        Dense invalid( ops, p, control, linear, Dense::params{ "ROS34PW2" } );
+    }
+    catch ( const std::invalid_argument & )
+    {
+        unsupported = true;
+    }
+    check(
+        unsupported && guarded_memory::allocations.size() == before,
+        "Unsupported W dense output allocated backend workspace"
+    );
     check( time->derivatives > 0 && time->time == .37, "Guarded ROS2 omitted f_t or changed base time" );
-    std::cout << "Fixed/adaptive/non-autonomous ROS2/ROS3, fixed workspace and blocked vector-sized host transfers: "
-              << checks << " checks PASS\n";
+    std::cout
+        << "Fixed/adaptive/non-autonomous ROS2/ROS3/ROS34PW2, fixed workspace and blocked vector-sized host transfers: "
+        << checks << " checks PASS\n";
 }
 catch ( const std::exception &e )
 {

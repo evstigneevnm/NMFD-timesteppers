@@ -525,8 +525,9 @@ Four backend workspace vectors for ROS2, five for ROS3, are allocated once, with
 storage. Failures never publish partial output. Error-requiring controllers
 without the extended error-assessment signature report `error_estimate_unavailable`.
 `reference_time` defaults to one.
-Nontrivial mass, DAEs and approximate-Jacobian W schemes are not supported yet;
-the supplied problem must satisfy the documented identity-mass contract.
+Nontrivial mass and DAEs are not supported yet; the supplied problem must satisfy
+the documented identity-mass contract. ROS2/ROS3 retain the exact-Jacobian
+requirement. The separately selected W-method below permits approximations.
 
 Autonomous problems need no additional method or storage. With
 `params.autonomous=false`, the problem must additionally provide:
@@ -580,6 +581,35 @@ changing its default method matrix or enabling unsupported mass/DAE cases:
 bash tests/run_all.sh --systems lorenz rossler vdp vdp_stiff time_coefficient stiff_tracking \
   --methods ROS2 ROS3 --controllers scipy --end 0.4 --sample-step 0.017
 ```
+
+### Rosenbrock/W ROS34PW2
+
+Select `params.method="ROS34PW2"` for the four-stage third-order
+[Rang/Angermann W-method](https://petsc.org/main/manualpages/TS/TSROSWRA34PW2/)
+with a second-order embedded estimator. Its physical `evaluate_rate()` and
+optional non-autonomous `evaluate_time_derivative()` contracts are unchanged.
+The problem may supply `a*I-b*B` from `get_jacobi_operator()`, with an approximate
+or problem-owned lagged Jacobian B frozen throughout each attempt. Preparation
+and solver binding still occur on every attempt; changed timesteps must update
+the shift even when B is reused. Linear-solve failures are still failures.
+
+All existing controllers use the combined state defect with exponent three.
+Each successful attempt uses four rates, four solves and one operator binding.
+Six backend workspace vectors are allocated once, seven for non-autonomous runs;
+there is no per-step vector allocation or vector-sized host/device transfer.
+Classical W order does not guarantee stability for an arbitrary approximation.
+The physical rate and partial time derivative must not be approximated merely
+because the stage Jacobian is approximate.
+
+`table().supports_approximate_jacobian()` reports this validated capability.
+W-compatible dense output is a separate increment: `DenseOutput=true` rejects
+ROS34PW2 before allocating backend workspace. Neither the ROS3 interpolant nor
+the published exact-Jacobian continuous extension is silently reused. See
+[coefficient conversion, order conditions and limits](docs/rosenbrock_w_methods.md).
+Separate W tests cover the original table, nonlinear and noncommuting systems,
+zero/perturbed/lagged approximations, all controllers, non-autonomous backward
+integration, fourth-stage failures, retry shifts and modified commits. They run
+through the existing Rosenbrock CPU/OpenMP/CUDA targets and parent CI.
 
 ## Non-Autonomous Verification
 
