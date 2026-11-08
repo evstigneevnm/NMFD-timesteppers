@@ -20,7 +20,7 @@
 
 namespace nmfd::time_steppers::rosenbrock
 {
-// Identity-rate ODEs or opt-in autonomous constant-mass residuals. Only W
+// Identity-rate ODEs or opt-in constant-mass residuals. Only W
 // tables permit approximate Jacobians. Evaluations preserve the frozen operator.
 template <class VectorOperations, class Problem, class TimeStepAdaptation, class LinearSolver, bool DenseOutput = false>
 class time_step
@@ -43,8 +43,8 @@ public:
         "Rosenbrock requires the existing shifted-stage interface"
     );
 
-    // Allocate stage increments and two reusable scratch vectors, plus f_t only
-    // for non-autonomous problems. Estimation and shared rates reuse scratch.
+    // Allocate stage increments and two scratch vectors, plus q_t only for
+    // non-autonomous problems. Estimation and shared rates reuse scratch.
     time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
         std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<LinearSolver> solver, const params &p = {}
@@ -64,8 +64,6 @@ public:
     {
         if ( !p.maximum_attempts )
             throw std::invalid_argument( "Rosenbrock requires a nonempty attempt budget" );
-        if ( p.mass_form && !p.autonomous )
-            throw std::invalid_argument( "Mass-form Rosenbrock currently requires autonomous constant mass" );
         if ( !p.mass_form && !detail::has_rate_evaluation<Problem, vector_type>::value )
             throw std::invalid_argument( "Rate-form Rosenbrock requires bool evaluate_rate(state, rate)" );
         if constexpr ( DenseOutput )
@@ -336,7 +334,8 @@ private:
                     std::array<double, 4> coupling{};
                     for ( std::size_t j = 0; j < i; ++j )
                         coupling[j] = table_.gamma * table_.c( i, j );
-                    if ( !residual_rhs( *state, coupling ) || !solve( *increments_[i] ) )
+                    if ( !residual_rhs( *state, coupling, stage_time, table_.time_derivative( i ) ) ||
+                         !solve( *increments_[i] ) )
                         return false;
                     continue;
                 }
@@ -393,29 +392,36 @@ private:
     // For R(U)=a*M*(U-previous)-b*f(U), previous=U+sum(q_j*y_j)
     // gives -R=b*f(U)+a*M*sum(q_j*y_j), without a mass inverse or action API.
     // apply() must not change the operator prepared at the attempt's base state.
-    bool residual_rhs( const vector_type &state, const std::array<double, 4> &coupling )
+    bool residual_rhs(
+        const vector_type &state, const std::array<double, 4> &coupling, scalar_type stage_time,
+        double time_coefficient = 0
+    )
     {
         auto &previous = problem_->previous_state();
         operations_->assign( state, previous );
         for ( std::size_t j = 0; j < increments_.size(); ++j )
             if ( coupling[j] != 0 )
                 operations_->add_lin_comb( scalar_type( coupling[j] ), *increments_[j], previous );
+        if ( !params_.autonomous && time_coefficient != 0 )
+        {
+            // M*q_t=f_t for constant mass. Encode h^2*gamma*d_i*q_t without
+            // forming h^2, which can overflow/underflow despite a finite defect.
+            operations_->assign_lin_comb( dt_, *time_derivative_, *rhs_ );
+            operations_->add_lin_comb( dt_ * scalar_type( table_.gamma * time_coefficient ), *rhs_, previous );
+        }
         if ( !operations_->is_valid_number( previous ) )
         {
             status_ = single_step_status::failed_nonfinite;
             return false;
         }
-        problem_->apply( state, *rhs_ );
-        operations_->scale( scalar_type( -1 ), *rhs_ );
-        if ( !operations_->is_valid_number( *rhs_ ) )
-        {
-            status_ = single_step_status::failed_nonfinite;
-            return false;
-        }
-        return true;
+        return evaluate_at_time( stage_time, [&] {
+            problem_->apply( state, *rhs_ );
+            operations_->scale( scalar_type( -1 ), *rhs_ );
+            return true;
+        } );
     }
 
-    // Recompute f_t at each attempt's base point; never silently difference rates.
+    // Recompute partial rate derivative q_t at the base point of every attempt.
     bool prepare_time_derivative( const vector_type &state )
     {
         if ( params_.autonomous )
@@ -434,48 +440,53 @@ private:
         return true;
     }
 
-    // Restore base time after a non-autonomous stage evaluation, including
-    // failed rates and exceptions; the shifted Jacobian stays frozen throughout.
+    // No rate callback is needed by residual-form problems.
     bool rate( const vector_type &state, scalar_type stage_time )
     {
         if constexpr ( !detail::has_rate_evaluation<Problem, vector_type>::value )
             throw std::logic_error( "Rate evaluation is unavailable for this Rosenbrock problem" );
         else
+            return evaluate_at_time( stage_time, [&] { return problem_->evaluate_rate( state, *rhs_ ); } );
+    }
+
+    // Restore base time after stage/endpoint evaluations, including failures
+    // and exceptions. Neither callback may overwrite the frozen linearization.
+    template <class Evaluation>
+    bool evaluate_at_time( scalar_type stage_time, Evaluation evaluate )
+    {
+        if ( !std::isfinite( stage_time ) )
         {
-            if ( !std::isfinite( stage_time ) )
-            {
-                status_ = single_step_status::failed_nonfinite;
-                return false;
-            }
-            bool ok;
-            if ( stage_time == time_ )
-                ok = problem_->evaluate_rate( state, *rhs_ );
-            else
-            {
-                try
-                {
-                    problem_->set_time( stage_time );
-                    ok = problem_->evaluate_rate( state, *rhs_ );
-                }
-                catch ( ... )
-                {
-                    problem_->set_time( time_ );
-                    throw;
-                }
-                problem_->set_time( time_ );
-            }
-            if ( !ok )
-            {
-                status_ = single_step_status::failed_solver;
-                return false;
-            }
-            if ( !operations_->is_valid_number( *rhs_ ) )
-            {
-                status_ = single_step_status::failed_nonfinite;
-                return false;
-            }
-            return true;
+            status_ = single_step_status::failed_nonfinite;
+            return false;
         }
+        bool ok;
+        if ( stage_time == time_ )
+            ok = evaluate();
+        else
+        {
+            try
+            {
+                problem_->set_time( stage_time );
+                ok = evaluate();
+            }
+            catch ( ... )
+            {
+                problem_->set_time( time_ );
+                throw;
+            }
+            problem_->set_time( time_ );
+        }
+        if ( !ok )
+        {
+            status_ = single_step_status::failed_solver;
+            return false;
+        }
+        if ( !operations_->is_valid_number( *rhs_ ) )
+        {
+            status_ = single_step_status::failed_nonfinite;
+            return false;
+        }
+        return true;
     }
 
     bool solve( vector_type &increment )
@@ -510,7 +521,9 @@ private:
                 std::array<double, 4> coupling{};
                 for ( std::size_t i = 0; i < increments_.size(); ++i )
                     coupling[i] = -table_.gamma * table_.m( i );
-                if ( !residual_rhs( *work_, coupling ) || !solve( *dense_.correction ) )
+                const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+                if ( !residual_rhs( *work_, coupling, params_.autonomous ? time_ : endpoint ) ||
+                     !solve( *dense_.correction ) )
                     return false;
             }
             else
@@ -546,7 +559,8 @@ private:
             const auto &coupling = ros34pw2_dense_coupling( stage );
             if ( params_.mass_form )
             {
-                if ( !residual_rhs( stage ? *work_ : in, coupling ) )
+                const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+                if ( !residual_rhs( stage ? *work_ : in, coupling, params_.autonomous || !stage ? time_ : endpoint ) )
                     return false;
             }
             else

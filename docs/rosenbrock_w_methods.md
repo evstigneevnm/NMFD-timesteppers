@@ -5,7 +5,7 @@ an embedded method of order two. Original coefficients are tabulated in
 [PETSc's source](https://petsc.org/main/src/ts/impls/rosw/rosw.c.html);
 [the method documentation](https://petsc.org/main/manualpages/TS/TSROSWRA34PW2/)
 identifies the 2005 paper. This implementation supports identity-rate ODEs and
-optional autonomous constant nonsingular mass, not the paper's broader DAE setting.
+optional constant nonsingular mass, not the paper's broader DAE setting.
 
 ## Coefficient Convention
 
@@ -163,7 +163,7 @@ retry rebuilds all ordinary and dense data from the unchanged committed state.
 The extension is rational and has bounded scalar stiff-decay samples with B=J;
 tests also exercise B=J/2 and B=2*J. This is not an assertion of stability for
 arbitrary B, positivity, monotonicity or accuracy inside unresolved initial
-layers. Autonomous constant nonsingular mass is supported by the optional
+layers. Constant nonsingular mass is supported by the optional
 [residual form](rosenbrock_mass.md). Variable/singular mass, DAEs and prepared
 periodic-orbit derivatives remain unsupported.
 Ordinary ROS2/ROS3 continuous extensions are unchanged.

@@ -1,4 +1,4 @@
-#include "implicit_rosenbrock_mass_problem.h"
+#include "implicit_rosenbrock_mass_time_problem.h"
 #include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
@@ -257,6 +257,14 @@ try
     auto mass = std::make_shared<mass_problem<noncommuting_decay, space>>( ops );
     for ( const char *method : { "ROS2", "ROS3", "ROS34PW2" } )
     {
+        auto timed_mass = std::make_shared<mass_time_problem<space>>( ops );
+        if ( std::string( method ) == "ROS34PW2" )
+        {
+            timed_mass->model.factor = .4;
+            timed_mass->model.offset = .2;
+        }
+        adaptive_mode( timed_mass, true, method, std::false_type{}, true );
+        adaptive_mode( timed_mass, true, method, std::true_type{}, true );
         // ROS2/ROS3 require the exact state Jacobian; only W uses this B.
         if ( std::string( method ) == "ROS34PW2" )
         {

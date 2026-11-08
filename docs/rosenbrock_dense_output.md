@@ -2,7 +2,7 @@
 
 ROS2 and ROS3 use native increment polynomials, not endpoint-rate Hermite
 interpolation. The derivation below assumes the exact base Jacobian and identity
-mass; autonomous constant nonsingular mass uses the equivalent
+mass; constant nonsingular mass uses the equivalent
 [residual-form corrections](rosenbrock_mass.md). The original endpoint and error estimator do not
 change. Their coefficients are the [KPP increment-form tables](https://kpp.readthedocs.io/en/stable/num_methods/rosenbrock-methods.html).
 

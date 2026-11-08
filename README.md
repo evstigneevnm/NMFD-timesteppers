@@ -526,7 +526,7 @@ storage. Failures never publish partial output. Error-requiring controllers
 without the extended error-assessment signature report `error_estimate_unavailable`.
 `reference_time` defaults to one.
 The default rate path requires the documented identity-rate shifted operator.
-For autonomous constant nonsingular mass, select the residual form below.
+For constant nonsingular mass, select the residual form below.
 DAEs are not supported. ROS2/ROS3 retain the exact-Jacobian
 requirement. The separately selected W-method below permits approximations.
 
@@ -627,14 +627,14 @@ remains unsupported.
 
 ### Constant-Mass Residual Form
 
-Set `params.mass_form=true` for autonomous `M*u'=f(u)` with constant nonsingular
+Set `params.mass_form=true` for `M*u'=f(t,u)` with constant nonsingular
 M. All three tables support fixed/adaptive steps and their native dense output.
 The default is false, preserving existing rate-based execution and costs.
 No constructor, integrator, controller, solver or problem-method signatures change.
 Mass form needs only the existing shifted residual `apply`, reference buffers,
 and prepared Jacobian; `evaluate_rate` is not required or called.
 
-The problem supplies `R(U)=a*M*(U-previous_state)-b*(f(U)+known_rhs)` and the
+The problem supplies `R(U)=a*M*(U-previous_state)-b*(f(t,U)+known_rhs)` and the
 frozen operator `a*M-b*B`. ROS2/ROS3 require B=J_f; ROS34PW2 permits its validated
 approximation. Stage residual calls must preserve the prepared operator.
 The engine sets `known_rhs=0` and changes the reference buffer to encode the
@@ -645,8 +645,13 @@ Mass form performs two/three/four residuals and shifted solves for
 ROS2/ROS3/ROS34PW2. Enabled dense output adds zero/one/two residuals and solves
 after error acceptance. Storage is unchanged, with no per-step vector allocations
 or vector-sized host/device copies; sampling remains backend-only O(N) algebra.
-Non-autonomous selection is rejected explicitly: the rate-time-derivative
-callback is not a physical-force derivative. Singular and variable mass are
+For non-autonomous equations set `params.autonomous=false` and supply the
+existing `evaluate_time_derivative(state,out)` callback, returning partial q_t
+for q=M^{-1}f, not f_t or a total derivative. Constant M gives M*q_t=f_t;
+the reference buffer encodes the correctly mass-weighted time correction.
+Use the existing single additional q_t vector, with one evaluation per attempt.
+Stage and dense endpoint evaluations restore base time and preserve the frozen
+operator. `evaluate_rate` remains unnecessary. Singular and variable mass are
 not validated capabilities, even if their shifted operators happen to solve.
 
 ## Non-Autonomous Verification

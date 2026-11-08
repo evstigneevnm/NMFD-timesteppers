@@ -135,7 +135,7 @@ void lifecycle( const char *method )
     {
         refused = true;
     }
-    check( refused, "Mass form silently accepted an unsupported non-autonomous contract" );
+    check( refused, "Mass form accepted non-autonomous execution without a partial-time callback" );
     sp.autonomous = true;
     sp.mass_form  = false;
     refused       = false;
