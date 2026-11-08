@@ -31,6 +31,7 @@ inline const std::array<double, 4> &ros34pw2_dense_coupling( std::size_t stage )
 // three (two for ROS2); see the derivation in docs/rosenbrock_dense_output.md.
 // For ROS34PW2 these weights provide the secant correction; two independently
 // prepared W slope increments supply the remaining Hermite-basis terms.
+// ROSI2P2 instead supplies h times consistent endpoint rates for the same basis.
 template <class T>
 std::array<T, 4> continuous_weights( const method_table &table, T theta )
 {

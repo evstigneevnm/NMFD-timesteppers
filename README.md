@@ -652,8 +652,8 @@ for q=M^{-1}f, not f_t or a total derivative. Constant M gives M*q_t=f_t;
 the reference buffer encodes the correctly mass-weighted time correction.
 Use the existing single additional q_t vector, with one evaluation per attempt.
 Stage and dense endpoint evaluations restore base time and preserve the frozen
-operator. `evaluate_rate` remains unnecessary. Singular mass uses the bounded
-index-1 selection below; variable mass is not validated merely by a shifted solve.
+operator. `evaluate_rate` remains unnecessary. Singular mass requires an explicit
+DAE selection below; variable mass is not validated merely by a shifted solve.
 
 ### Autonomous Constant-Mass Index-1 DAEs
 
@@ -730,6 +730,29 @@ the existing state-mass decay and time-mass systems, with unchanged equations:
 bash tests/run_all.sh --systems state_mass time_mass --methods ROS2 ROS3 ROS34PW2 \
   --controllers scipy --start 0.25 --end 0.65 --sample-step 0.017
 ```
+
+### Gauged Index-2 Problems And Moving Constraints
+
+Select `method="ROSI2P2"`, `mass_form=true`, `index2_dae=true` for the validated
+constant-mass, exact-Jacobian Stokes-like path. Supply the complete coupled
+shifted operator with unscaled constraint/gauge rows, consistent initial data,
+and a problem-selected pressure gauge. Use clock augmentation for moving
+constraints; the q_t contract is unchanged. No inverse of singular M is needed.
+
+Index-2 adaptation uses separately validated constraint-aware embedded weights
+and controller exponent two; the published ODE embedded pair is unchanged for
+ordinary ODEs. The tests distinguish third-order velocities from second-order
+raw moving multipliers. Enforce primary/hidden/gauge tolerances independently.
+
+`DenseOutput=true` additionally requires problem-owned consistent endpoint rates.
+Hermite sampling reports differential order three, not automatic algebraic
+accuracy. The external manager reconstructs constrained samples and pressure
+before events/commitment. Borrowed-view/finalize rules are unchanged.
+Disabled dense output uses six backend vectors and four shifted solves;
+enabled dense output adds three vectors and two rates, with no additional solves.
+CPU/OpenMP/CUDA/HIP, sanitizer and large transfer/allocation guards cover this
+selection. General variable-mass DAEs remain unsupported. See
+[derivation, estimator, accuracy and reconstruction limits](docs/rosenbrock_index2.md).
 
 ## Non-Autonomous Verification
 

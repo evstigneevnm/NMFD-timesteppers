@@ -38,6 +38,7 @@ public:
         bool         autonomous       = true;
         bool         mass_form        = false;
         bool         index1_dae       = false;
+        bool         index2_dae       = false;
     };
 
     static_assert(
@@ -66,6 +67,8 @@ public:
     {
         if ( !p.maximum_attempts )
             throw std::invalid_argument( "Rosenbrock requires a nonempty attempt budget" );
+        if ( p.index1_dae && p.index2_dae )
+            throw std::invalid_argument( "Select only one Rosenbrock DAE capability" );
         if ( p.index1_dae )
         {
             if ( !p.mass_form || !p.autonomous || !table_.supports_constant_mass_index1() )
@@ -73,11 +76,17 @@ public:
             if constexpr ( DenseOutput )
                 throw std::invalid_argument( "Index-1 Rosenbrock dense output is not validated" );
         }
+        if ( p.index2_dae && ( !p.mass_form || !p.autonomous || !table_.supports_constant_mass_index2() ) )
+            throw std::invalid_argument( "Index-2 Rosenbrock requires autonomous ROSI2P2 mass form" );
         if ( !p.mass_form && !detail::has_rate_evaluation<Problem, vector_type>::value )
             throw std::invalid_argument( "Rate-form Rosenbrock requires bool evaluate_rate(state, rate)" );
         if constexpr ( DenseOutput )
+        {
             if ( !table_.dense_output_order() )
                 throw std::invalid_argument( "Selected Rosenbrock method has no validated dense output" );
+            if ( table_.requires_consistent_dense_rates() && !detail::has_rate_evaluation<Problem, vector_type>::value )
+                throw std::invalid_argument( "ROSI2P2 dense output requires problem-owned consistent rates" );
+        }
         if ( !p.autonomous && !detail::has_time_derivative_evaluation<Problem, vector_type>::value )
             throw std::invalid_argument(
                 "Non-autonomous Rosenbrock requires bool evaluate_time_derivative(state, out)"
@@ -288,7 +297,9 @@ private:
     {
         if constexpr ( detail::has_embedded_assessment<TimeStepAdaptation, vector_type, scalar_type>::value )
             if ( estimate_error_ )
-                return adaptation_->assess( time_, dt_, in, *work_, next_dt, table_.error_order(), &*rhs_ );
+                return adaptation_->assess(
+                    time_, dt_, in, *work_, next_dt, params_.index2_dae ? 2u : table_.error_order(), &*rhs_
+                );
         return adaptation_->assess( time_, dt_, in, *work_, next_dt );
     }
 
@@ -351,7 +362,7 @@ private:
                 if ( !rate( *state, stage_time ) )
                     return false;
                 if constexpr ( DenseOutput )
-                    if ( table_.stage_count() == 4 && i == 0 )
+                    if ( table_.stage_count() == 4 && !table_.requires_consistent_dense_rates() && i == 0 )
                         operations_->assign( *rhs_, *dense_.correction );
                 // Once the stage state has been consumed, work_ can retain its
                 // unshifted rate for consecutive stages sharing that state/time.
@@ -384,11 +395,15 @@ private:
         if ( estimate_error_ )
         {
             // k_i are state increments, so the error already contains h.
+            // Index-2 pressure defects are O(h^2), unlike ODE local errors.
+            const auto weight = [&]( std::size_t i ) {
+                return params_.index2_dae ? table_.index2_e( i ) : table_.e( i );
+            };
             operations_->assign_lin_comb(
-                scalar_type( table_.e( 0 ) ), *increments_[0], scalar_type( table_.e( 1 ) ), *increments_[1], *rhs_
+                scalar_type( weight( 0 ) ), *increments_[0], scalar_type( weight( 1 ) ), *increments_[1], *rhs_
             );
             for ( std::size_t i = 2; i < table_.stage_count(); ++i )
-                operations_->add_lin_comb( scalar_type( table_.e( i ) ), *increments_[i], *rhs_ );
+                operations_->add_lin_comb( scalar_type( weight( i ) ), *increments_[i], *rhs_ );
             if ( !operations_->is_valid_number( *rhs_ ) )
             {
                 status_ = single_step_status::failed_nonfinite;
@@ -525,7 +540,25 @@ private:
     // frozen operator are unchanged. Preserve the base state before publication.
     bool prepare_dense( const vector_type &in )
     {
-        if ( table_.stage_count() == 3 )
+        if ( table_.requires_consistent_dense_rates() )
+        {
+            // Cubic Hermite slopes. The problem owns consistent DAE rates;
+            // no singular mass inverse or pressure interpolation is inferred.
+            const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+            if ( !rate( in, time_ ) )
+                return false;
+            operations_->assign_lin_comb( dt_, *rhs_, *dense_.correction );
+            if ( !rate( *work_, params_.autonomous ? time_ : endpoint ) )
+                return false;
+            operations_->assign_lin_comb( dt_, *rhs_, *dense_.endpoint );
+            if ( !operations_->is_valid_number( *dense_.correction ) ||
+                 !operations_->is_valid_number( *dense_.endpoint ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
+        }
+        else if ( table_.stage_count() == 3 )
         {
             if ( params_.mass_form )
             {

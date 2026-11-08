@@ -177,8 +177,11 @@ linear/preconditioner costs depend on the formulation.
 
 ## Capability Limits
 
-State/time-dependent mass in the native residual path, non-autonomous singular-mass
-DAEs, higher-index systems, index reduction and DAE dense output are outside this capability.
+State/time-dependent mass in the native residual path, native non-autonomous
+singular-mass DAEs and index reduction are outside this capability. Gauged
+index-2 execution, clock-augmented moving constraints and problem-reconstructed
+dense samples have a separate [ROSI2P2 contract](rosenbrock_index2.md); none are
+inferred for ROS34PW2.
 The q_t contract used above for nonsingular mass does not encode general moving
 algebraic constraints. No claim is inferred from a successful
 shifted solve, and the engine cannot detect these properties of an arbitrary

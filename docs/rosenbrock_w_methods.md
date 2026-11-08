@@ -5,7 +5,9 @@ an embedded method of order two. Original coefficients are tabulated in
 [PETSc's source](https://petsc.org/main/src/ts/impls/rosw/rosw.c.html);
 [the method documentation](https://petsc.org/main/manualpages/TS/TSROSWRA34PW2/)
 identifies the 2005 paper. This implementation supports identity-rate ODEs and
-optional constant nonsingular mass, not the paper's broader DAE setting.
+optional constant nonsingular mass; its bounded index-1 selection is documented
+separately in [the mass/DAE contract](rosenbrock_mass.md#index-1-daes). No broader
+DAE setting is inferred from this table's ODE order.
 
 ## Coefficient Convention
 

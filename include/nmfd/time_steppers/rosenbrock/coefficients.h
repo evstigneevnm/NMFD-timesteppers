@@ -43,6 +43,7 @@ class method_table
         std::array<bool, 4>   reuse;
         unsigned int          dense_order;
         bool                  approximate_jacobian, constant_mass_index1;
+        bool                  constant_mass_index2 = false, consistent_dense_rates = false;
     };
     const data data_;
 
@@ -121,6 +122,36 @@ class method_table
                 true
             };
         }
+        if ( method == "ROSI2P2" )
+        {
+            // Rang/Angermann, Equadiff 11, Table 3.2 (exact Jacobian).
+            // https://dml.cz/bitstream/handle/10338.dmlcz/700435/Equadiff_11-2005-2_46.pdf
+            // Same offline Gamma conversion as ROS34PW2. Dense output uses
+            // supplied consistent rates, never the ROS34PW2 W extension.
+            return {
+                4,
+                3,
+                2,
+                .435866521508459,
+                { 1.147140180139520858374069441024994, 2.807348188211369333282486665264687,
+                  3.486932172067671732747383225698581, 2.807348188211369333282486665264687,
+                  3.486932172067671732747383225698581, 0 },
+                { -2.631861185781064730394870243482521, 4.976389977276388563291233174757657,
+                  6.181041021340408763341222994489695, -1.761050184345382171337486299258052,
+                  -6.545972652439726767089517921081592, -.5397062364249986333345236738900348 },
+                { 2.807348188211369287396879459683852, 3.486932172067671732747383225698581, 0, 1 },
+                { 2.387263929688442729509254003047659, 9.430231513778988246236267166278473,
+                  -.3605594399403733507230583798329993, 4.343738912424889950029800249094603 },
+                { 0, .5, 1, 1 },
+                { .435866521508459, -.064133478491541, 1.20849664917601008, 0 },
+                { false, false, false, true },
+                3,
+                false,
+                false,
+                true,
+                true
+            };
+        }
         throw std::invalid_argument( "Unknown Rosenbrock method: " + method );
     }
 
@@ -173,6 +204,14 @@ public:
     {
         return data_.constant_mass_index1;
     }
+    bool supports_constant_mass_index2() const
+    {
+        return data_.constant_mass_index2;
+    }
+    bool requires_consistent_dense_rates() const
+    {
+        return data_.consistent_dense_rates;
+    }
     double a( std::size_t i, std::size_t j ) const
     {
         return lower( data_.a, i, j );
@@ -190,6 +229,20 @@ public:
     {
         require_stage( i );
         return data_.e[i];
+    }
+    // The published embedded pair has ODE order two, but misses the index-2
+    // constraint moments. These separate weights also impose bhat*B^-1*c^2=1
+    // (and hence bhat*B^-2*c^2=2), with bhat_4=1/2. See docs/rosenbrock_index2.md.
+    double index2_e( std::size_t i ) const
+    {
+        require_stage( i );
+        if ( !data_.constant_mass_index2 )
+            throw std::invalid_argument( "No index-2 error estimator for this table" );
+        static constexpr std::array<double, 4> weights = {
+            -.02367785740579129626225027743122696, .06922647661102506434502903623940462,
+            .01221362103327118663425008515765932, -.1471401801395208583740694410249945
+        };
+        return weights[i];
     }
     double stage_time( std::size_t i ) const
     {

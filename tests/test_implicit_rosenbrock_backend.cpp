@@ -1,6 +1,7 @@
 #include "implicit_rosenbrock_mass_time_problem.h"
 #include "implicit_rosenbrock_dae_problem.h"
 #include "implicit_rosenbrock_variable_mass_problem.h"
+#include "implicit_rosenbrock_index2_problem.h"
 #include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
@@ -358,10 +359,106 @@ try
     };
     dae_mode( std::false_type{} );
     dae_mode( std::true_type{} );
+    auto index2_mode = [&]( auto moving, auto dense, auto adaptive ) {
+        using Problem = index2_problem<decltype( moving )::value, space, decltype( dense )::value>;
+        using Linear  = krylov_solver<Problem, space>;
+        using Base    = std::conditional_t<
+               decltype( adaptive )::value, integration::time_step_adaptation_scipy<space>,
+               integration::time_step_adaptation_constant<space>>;
+        using Control   = index2_control<Base, Problem>;
+        using Step      = rosenbrock::time_step<space, Problem, Control, Linear, decltype( dense )::value>;
+        auto operations = std::make_shared<space>( Problem::block_size * 1638 );
+        auto problem    = std::make_shared<Problem>( operations );
+        problem->rate_consistency_tolerance = 1e-3;
+        typename Linear::params lp;
+        lp.basis_size            = 6;
+        lp.batch_size            = 1;
+        lp.monitor.rel_tol       = 1e-12;
+        lp.monitor.abs_tol       = 0;
+        lp.monitor.max_iters_num = 60;
+        auto linear              = std::make_shared<Linear>( operations, nullptr, lp );
+        auto control             = [&] {
+            if constexpr ( adaptive )
+            {
+                typename Base::params cp;
+                cp.relative_tolerance = 1e-4;
+                cp.absolute_tolerance = 1e-6;
+                cp.initial_step = cp.maximum_step = .01;
+                return std::make_shared<Control>( problem, operations, cp );
+            }
+            else
+                return std::make_shared<Control>( problem, typename Base::params{ .01 } );
+        }();
+        control->constraint_tolerance = 1e-3;
+        nmfd::detail::vector_wrap<space> input( *operations ), output( *operations ), sample( *operations );
+        input.start_use();
+        output.start_use();
+        sample.start_use();
+        const auto baseline  = guarded_memory::allocations.size();
+        const auto workspace = dense ? 9u : 6u;
+        for ( unsigned int i = 1; i <= workspace; ++i )
+        {
+            operations->fail_activation = operations->activations + i;
+            bool failed                 = false;
+            try
+            {
+                Step invalid( operations, problem, control, linear, index2_params<Step>() );
+            }
+            catch ( const std::runtime_error & )
+            {
+                failed = true;
+            }
+            check(
+                failed && guarded_memory::allocations.size() == baseline,
+                "Partial index-2 construction leaked backend storage"
+            );
+        }
+        operations->fail_activation = 0;
+        Step step( operations, problem, control, linear, index2_params<Step>() );
+        check(
+            guarded_memory::allocations.size() == baseline + workspace, "Index-2 engine allocated unexpected workspace"
+        );
+        std::size_t allocated = 0;
+        for ( unsigned int repeat = 0; repeat < 4; ++repeat )
+        {
+            step.reset();
+            problem->initialize_state( .37, *input );
+            step.set_time( .37 );
+            step.set_target_time( .38 );
+            step.apply( *input, *output );
+            check( step.get_status() == single_step_status::converged, "Guarded full-system index-2 solve failed" );
+            if constexpr ( dense )
+            {
+                auto view = step.get_continuous_integration();
+                for ( double theta : { 0., .25, .5, .75, 1. } )
+                {
+                    view.evaluate( theta, *sample );
+                    problem->reconstruct( *sample, *sample );
+                    check(
+                        problem->constraint_norm( *sample, problem->known_rhs() ) < 1e-10,
+                        "Backend constrained reconstruction failed"
+                    );
+                }
+            }
+            step.finalize( adaptation_status::accepted, .37 + step.get_dt(), *output );
+            if ( !repeat )
+                allocated = guarded_memory::allocation_count;
+            else
+                check( allocated == guarded_memory::allocation_count, "Index-2 allocated vectors after warmup" );
+        }
+        check( problem->rates == ( dense ? 8u : 0u ), "Disabled index-2 dense rates were evaluated" );
+    };
+    auto index2_variants = [&]( auto moving ) {
+        index2_mode( moving, std::false_type{}, std::false_type{} );
+        index2_mode( moving, std::true_type{}, std::false_type{} );
+        index2_mode( moving, std::false_type{}, std::true_type{} );
+        index2_mode( moving, std::true_type{}, std::true_type{} );
+    };
+    index2_variants( std::false_type{} );
+    index2_variants( std::true_type{} );
     check( time->derivatives > 0 && time->time == .37, "Guarded ROS2 omitted f_t or changed base time" );
-    std::cout
-        << "Fixed/adaptive/non-autonomous ROS2/ROS3/ROS34PW2, fixed workspace and blocked vector-sized host transfers: "
-        << checks << " checks PASS\n";
+    std::cout << "Fixed/adaptive ROS2/ROS3/ROS34PW2/ROSI2P2, fixed workspace and blocked vector-sized host transfers: "
+              << checks << " checks PASS\n";
 }
 catch ( const std::exception &e )
 {
