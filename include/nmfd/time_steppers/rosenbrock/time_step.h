@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
@@ -14,6 +15,7 @@
 #include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
 #include <nmfd/time_steppers/rosenbrock/coefficients.h>
+#include <nmfd/time_steppers/rosenbrock/continuous_integration.h>
 
 namespace nmfd::time_steppers::rosenbrock
 {
@@ -57,7 +59,7 @@ public:
               solver ? std::move( solver ) : throw std::invalid_argument( "Rosenbrock requires a linear solver" )
           ),
           params_( p ), table_( p.method ), work_( *operations_ ), rhs_( *operations_ ),
-          time_derivative_( *operations_ )
+          time_derivative_( *operations_ ), dense_( *operations_ )
     {
         if ( !p.maximum_attempts )
             throw std::invalid_argument( "Rosenbrock requires a nonempty attempt budget" );
@@ -65,8 +67,6 @@ public:
             throw std::invalid_argument(
                 "Non-autonomous Rosenbrock requires bool evaluate_time_derivative(state, out)"
             );
-        if constexpr ( DenseOutput )
-            throw std::invalid_argument( "Rosenbrock dense output is not implemented" );
         detail::balanced_affine_shift( scalar_type( 0 ), p.reference_time );
         for ( auto *v : { &work_, &rhs_ } )
         {
@@ -84,6 +84,16 @@ public:
         {
             time_derivative_.init();
             time_derivative_.start_use();
+        }
+        if constexpr ( DenseOutput )
+        {
+            dense_.previous.init();
+            dense_.previous.start_use();
+            if ( table_.stage_count() == 3 )
+            {
+                dense_.correction.init();
+                dense_.correction.start_use();
+            }
         }
     }
 
@@ -120,13 +130,23 @@ public:
     }
     unsigned int dense_output_order() const
     {
-        return 0;
+        return DenseOutput ? table_.order() : 0;
+    }
+
+    // Borrow only the pending numerical step; the owner must outlive the view.
+    template <bool Enabled = DenseOutput, std::enable_if_t<Enabled && DenseOutput, int> = 0>
+    runge_kutta::continuous_integration<time_step> get_continuous_integration() const
+    {
+        if ( !pending_ )
+            throw std::logic_error( "No pending Rosenbrock dense output" );
+        return { *this, generation_ };
     }
 
     // Discard pending state and controller history without reallocating workspace.
     void reset()
     {
         adaptation_->reset();
+        ++generation_;
         initialized_ = pending_ = false;
         attempts_               = 0;
         dt_                     = 0;
@@ -138,6 +158,7 @@ public:
     void apply( const vector_type &in, vector_type &out )
     {
         require_finalized();
+        ++generation_;
         attempts_       = 0;
         estimate_error_ = adaptation_->requires_error_estimate();
         if ( estimate_error_ && !detail::has_embedded_assessment<TimeStepAdaptation, vector_type, scalar_type>::value )
@@ -181,6 +202,14 @@ public:
             const auto  decision = assess( in, next_dt );
             if ( decision == adaptation_status::accepted )
             {
+                if constexpr ( DenseOutput )
+                    if ( !prepare_dense( in ) )
+                    {
+                        if ( adaptation_->reject_step( dt_ ) != adaptation_status::rejected )
+                            return;
+                        adaptation_->update( adaptation_status::rejected, time_, dt_, in );
+                        continue;
+                    }
                 operations_->assign( *work_, out );
                 status_  = single_step_status::converged;
                 pending_ = true;
@@ -207,23 +236,27 @@ public:
                                                            : committed_time > time_ || committed_time < endpoint ) )
             throw std::invalid_argument( "Committed time is outside the pending Rosenbrock step" );
         adaptation_->update( outcome, committed_time, committed_time - time_, state );
+        ++generation_;
         pending_ = false;
     }
 
 private:
+    friend class runge_kutta::continuous_integration<time_step>;
     using vector_wrap_type = nmfd::detail::vector_wrap<VectorOperations, false, false>;
-    std::shared_ptr<VectorOperations>   operations_;
-    std::shared_ptr<Problem>            problem_;
-    std::shared_ptr<TimeStepAdaptation> adaptation_;
-    std::shared_ptr<LinearSolver>       solver_;
-    params                              params_;
-    method_table                        table_;
-    vector_wrap_type                    work_, rhs_, time_derivative_;
-    std::vector<vector_wrap_type>       increments_;
-    scalar_type                         time_ = 0, target_ = 1, dt_ = 0;
-    unsigned int                        attempts_    = 0;
-    bool                                initialized_ = false, pending_ = false, estimate_error_ = false;
-    single_step_status                  status_ = single_step_status::idle;
+    std::shared_ptr<VectorOperations>                               operations_;
+    std::shared_ptr<Problem>                                        problem_;
+    std::shared_ptr<TimeStepAdaptation>                             adaptation_;
+    std::shared_ptr<LinearSolver>                                   solver_;
+    params                                                          params_;
+    method_table                                                    table_;
+    vector_wrap_type                                                work_, rhs_, time_derivative_;
+    std::vector<vector_wrap_type>                                   increments_;
+    detail::rosenbrock_dense_storage<VectorOperations, DenseOutput> dense_;
+    std::size_t                                                     generation_ = 0;
+    scalar_type                                                     time_ = 0, target_ = 1, dt_ = 0;
+    unsigned int                                                    attempts_ = 0;
+    bool               initialized_ = false, pending_ = false, estimate_error_ = false;
+    single_step_status status_ = single_step_status::idle;
 
     void require_finalized() const
     {
@@ -409,6 +442,50 @@ private:
             return false;
         }
         return true;
+    }
+
+    // Only accepted numerical candidates pay for the ROS3 endpoint defect solve.
+    // Balanced increment sums avoid subtracting nearly equal endpoint states.
+    bool prepare_dense( const vector_type &in )
+    {
+        if ( table_.stage_count() == 3 )
+        {
+            const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+            if ( !rate( *work_, params_.autonomous ? time_ : endpoint ) )
+                return false;
+            const auto shift =
+                detail::balanced_affine_shift( scalar_type( 1 / table_.gamma ) / dt_, params_.reference_time );
+            operations_->scale( shift.b, *rhs_ );
+            for ( std::size_t i = 0; i < increments_.size(); ++i )
+                operations_->add_lin_comb(
+                    -shift.a * scalar_type( table_.gamma * table_.m( i ) ), *increments_[i], *rhs_
+                );
+            if ( !solve( *dense_.correction ) )
+                return false;
+        }
+        operations_->assign( in, *dense_.previous );
+        return true;
+    }
+
+    // Interpolation is backend algebra only; never call the problem while sampling.
+    scalar_type evaluate_dense( scalar_type theta, vector_type &out, std::size_t generation ) const
+    {
+        if ( !pending_ || generation != generation_ )
+            throw std::logic_error( "Expired Rosenbrock dense output" );
+        const auto weights = continuous_weights( table_, theta );
+        if ( theta == 0 )
+            operations_->assign( *dense_.previous, out );
+        else if ( theta == 1 )
+            operations_->assign( *work_, out );
+        else
+        {
+            operations_->assign_lin_comb( 1 - theta, *dense_.previous, theta, *work_, out );
+            for ( std::size_t i = 0; i < increments_.size(); ++i )
+                operations_->add_lin_comb( weights[i], *increments_[i], out );
+            if ( table_.stage_count() == 3 )
+                operations_->add_lin_comb( weights[3], *dense_.correction, out );
+        }
+        return theta == 1 ? ( dt_ == target_ - time_ ? target_ : time_ + dt_ ) : time_ + theta * dt_;
     }
 };
 }

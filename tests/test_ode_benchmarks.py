@@ -105,6 +105,21 @@ class BenchmarkAssemblyTests(unittest.TestCase):
             self.assertEqual(config["sample_step"], .017)
             self.assertEqual(len(config["cases"]), 5)
 
+    def test_rosenbrock_selects_only_identity_mass_systems_and_supports_dense_sampling(self):
+        args = self.args("--methods", "ROS2", "ROS3", "--controllers", "constant", "scipy", "--sample-step", ".017")
+        for system in runner.ROSENBROCK_SYSTEMS:
+            config = runner.configuration(args, system)
+            self.assertEqual(config["sample_step"], .017)
+            self.assertEqual(len(config["cases"]), 4)
+            self.assertEqual(config["skipped_methods"], [])
+        for system in set(runner.SYSTEMS) - set(runner.ROSENBROCK_SYSTEMS):
+            with self.assertRaisesRegex(ValueError, "identity-mass"):
+                runner.configuration(args, system)
+        mixed = self.args("--methods", "BDF2", "ROS3")
+        config = runner.configuration(mixed, "state_mass")
+        self.assertEqual(config["skipped_methods"], ["ROS3"])
+        self.assertTrue(all(case["method"] == "BDF2" for case in config["cases"]))
+
     def test_constant_step_respects_configured_bounds(self):
         for step in ("1e-10", "1"):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -342,6 +357,19 @@ class BenchmarkDiagnosticsTests(unittest.TestCase):
         self.save()
         with self.assertRaisesRegex(ValueError, "scheme"):
             runner.read_trajectory(self.path, self.config, self.case)
+
+    def test_rosenbrock_dense_metadata_uses_the_selected_continuous_order(self):
+        for method, order in (("ROS2", 2), ("ROS3", 3)):
+            self.case["method"] = method
+            self.config["sample_step"] = .1
+            self.metadata.update(method=method, scheme="rosenbrock", sampling="uniform_dense", sample_step=.1,
+                                 dense_output_order=order)
+            self.save()
+            runner.read_trajectory(self.path, self.config, self.case, sampled=True)
+            self.metadata["dense_output_order"] = 1
+            self.save()
+            with self.assertRaisesRegex(ValueError, "dense sampling"):
+                runner.read_trajectory(self.path, self.config, self.case, sampled=True)
 
     def make_dense_samples(self, bdf=False):
         self.case["method"] = "BDF2" if bdf else "IMEX_ARK324L2SA"

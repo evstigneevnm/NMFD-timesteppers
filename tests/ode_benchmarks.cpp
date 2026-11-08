@@ -1,4 +1,5 @@
 #include "ode_benchmark_imex.h"
+#include "ode_benchmark_rosenbrock.h"
 #include "implicit_bdf_adaptive_test.h"
 #include <fstream>
 #include <iomanip>
@@ -164,14 +165,18 @@ struct benchmark_constant_controller : adaptation_type
     }
 };
 
-template <class Equation, class Controller, bool IMEX = false, bool Dense = false, bool BDF = false>
+template <
+    class Equation, class Controller, bool IMEX = false, bool Dense = false, bool BDF = false, bool Rosenbrock = false>
 int integrate(
     const Equation &equation, const json &config, const std::string &path, const std::string &method,
     const std::string &controller
 )
 {
-    using problem_type = std::conditional_t<IMEX, benchmark_implicit_partition<Equation>, stage_problem<Equation>>;
+    using problem_type = std::conditional_t<
+        Rosenbrock, benchmark_rosenbrock_problem<Equation>,
+        std::conditional_t<IMEX, benchmark_implicit_partition<Equation>, stage_problem<Equation>>>;
     using types        = newton_types<problem_type>;
+    using solver_type  = std::conditional_t<Rosenbrock, typename types::linear_type, typename types::solver_type>;
     using control_type = std::conditional_t<
         std::is_same_v<Controller, adaptation_type>, benchmark_constant_controller,
         std::conditional_t<BDF, bdf_test::observed_bdf_controller<Controller>, observed_controller<Controller>>>;
@@ -183,8 +188,10 @@ int integrate(
              runge_kutta::implicit_time_step<
                  operations_type, problem_type, control_type, typename types::solver_type, Dense>>;
     using step_type = std::conditional_t<
-        BDF, bdf::implicit_time_step<operations_type, problem_type, control_type, typename types::solver_type, Dense>,
-        rk_step_type>;
+        Rosenbrock, rosenbrock::time_step<operations_type, problem_type, control_type, solver_type, Dense>,
+        std::conditional_t<
+            BDF, bdf::implicit_time_step<operations_type, problem_type, control_type, solver_type, Dense>,
+            rk_step_type>>;
     using writer_type =
         std::conditional_t<Dense, dense_trajectory_writer<Equation, step_type>, trajectory_writer<Equation>>;
     const auto &settings   = config.at( "adaptation" );
@@ -208,8 +215,9 @@ int integrate(
                 p.controller = controller;
             auto result = std::make_shared<control_type>( ops, p );
             if constexpr ( !BDF )
-                result->expected_order = IMEX ? runge_kutta::make_imex_butcher_table( method ).error_order()
-                                                     : runge_kutta::make_butcher_table( method ).error_order();
+                result->expected_order = Rosenbrock ? rosenbrock::method_table( method ).error_order()
+                                                : IMEX ? runge_kutta::make_imex_butcher_table( method ).error_order()
+                                                       : runge_kutta::make_butcher_table( method ).error_order();
             return result;
         }
     }();
@@ -226,8 +234,23 @@ int integrate(
         else
             return problem;
     }();
-    auto                       solver = types::make_solver( ops );
+    auto solver = [&] {
+        if constexpr ( Rosenbrock )
+        {
+            typename solver_type::params lp;
+            lp.basis_size            = 4;
+            lp.batch_size            = 1;
+            lp.monitor.abs_tol       = 0;
+            lp.monitor.rel_tol       = 1e-12;
+            lp.monitor.max_iters_num = 40;
+            return std::make_shared<solver_type>( ops, nullptr, lp );
+        }
+        else
+            return types::make_solver( ops );
+    }();
     typename step_type::params step_settings{ method };
+    if constexpr ( Rosenbrock )
+        step_settings.autonomous = benchmark_rosenbrock_autonomous<Equation>;
     if constexpr ( BDF )
     {
         step_settings.adaptive      = !std::is_same_v<Controller, adaptation_type>;
@@ -251,7 +274,7 @@ int integrate(
     metadata["method"]             = method;
     metadata["controller"]         = controller;
     metadata["backend"]            = backend_name;
-    metadata["scheme"]             = BDF ? "bdf" : IMEX ? "imex" : "dirk";
+    metadata["scheme"]             = Rosenbrock ? "rosenbrock" : BDF ? "bdf" : IMEX ? "imex" : "dirk";
     metadata["dense_output_order"] = step->dense_output_order();
     if constexpr ( BDF )
     {
@@ -288,9 +311,10 @@ int integrate(
         { "error_rejections", adaptation->error_rejections },
         { "numerical_rejections", adaptation->numerical_rejections },
         { "linearizations", problem->linearizations },
-        { "step_status", static_cast<int>( step->get_status() ) },
-        { "newton_status", solver->convergence_strategy()->get_result_status() }
+        { "step_status", static_cast<int>( step->get_status() ) }
     };
+    if constexpr ( !Rosenbrock )
+        report["newton_status"] = solver->convergence_strategy()->get_result_status();
     if constexpr ( BDF && !std::is_same_v<Controller, adaptation_type> )
     {
         report["orders_used"] = json::array();
@@ -308,6 +332,21 @@ int select_method(
     const std::string &controller
 )
 {
+    if ( method == "ROS2" || method == "ROS3" )
+    {
+        if constexpr ( benchmark_supports_rosenbrock<Equation> )
+        {
+            if ( config.value( "sample_step", 0. ) > 0 )
+                return integrate<Equation, Controller, false, true, false, true>(
+                    equation, config, path, method, controller
+                );
+            return integrate<Equation, Controller, false, false, false, true>(
+                equation, config, path, method, controller
+            );
+        }
+        else
+            throw std::invalid_argument( "Rosenbrock benchmarks support identity-mass ODEs only" );
+    }
     if ( method == "BDF1" || method == "BDF2" || method == "BDF" )
     {
         if ( config.value( "sample_step", 0. ) > 0 )

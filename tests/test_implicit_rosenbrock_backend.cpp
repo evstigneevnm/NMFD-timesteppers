@@ -163,11 +163,11 @@ try
             check( ops->norm( *out ) < 1e-10, "Matrix-free ROS2 output disagrees with its stability function" );
         }
     }
-    auto adaptive_mode = [&]( auto selected_problem, bool nonautonomous, const char *method ) {
+    auto adaptive_mode = [&]( auto selected_problem, bool nonautonomous, const char *method, auto dense ) {
         using Problem = typename decltype( selected_problem )::element_type;
         using Linear  = krylov_solver<Problem, space>;
         using Control = integration::time_step_adaptation_scipy<space>;
-        using Step    = rosenbrock::time_step<space, Problem, Control, Linear>;
+        using Step    = rosenbrock::time_step<space, Problem, Control, Linear, decltype( dense )::value>;
         typename Control::params cp;
         cp.relative_tolerance = 1e-4;
         cp.absolute_tolerance = 1e-6;
@@ -177,7 +177,8 @@ try
         typename Step::params sp;
         sp.method            = method;
         sp.autonomous        = !nonautonomous;
-        const auto workspace = rosenbrock::method_table( method ).stage_count() + 2 + ( nonautonomous ? 1 : 0 );
+        const auto stages    = rosenbrock::method_table( method ).stage_count();
+        const auto workspace = stages + 2 + ( nonautonomous ? 1 : 0 ) + ( dense ? ( stages == 2 ? 1 : 2 ) : 0 );
         const auto before    = guarded_memory::allocations.size();
         for ( unsigned int i = 1; i <= workspace; ++i )
         {
@@ -207,6 +208,12 @@ try
         step.set_target_time( .39 );
         step.apply( *state, *out );
         check( step.get_status() == single_step_status::converged, "Guarded adaptive ROS2 warmup failed" );
+        if constexpr ( dense )
+        {
+            auto view = step.get_continuous_integration();
+            for ( double theta : { 0., .25, .5, .75, 1. } )
+                view.evaluate( theta, *out );
+        }
         step.finalize( adaptation_status::accepted, .37 + step.get_dt(), *out );
         const auto allocated = guarded_memory::allocation_count;
         for ( unsigned int repeat = 0; repeat < 3; ++repeat )
@@ -216,6 +223,12 @@ try
             step.set_target_time( .39 );
             step.apply( *state, *out );
             check( step.get_status() == single_step_status::converged, "Guarded adaptive ROS2 restart failed" );
+            if constexpr ( dense )
+            {
+                auto view = step.get_continuous_integration();
+                for ( double theta : { 0., .25, .5, .75, 1. } )
+                    view.evaluate( theta, *out );
+            }
             step.finalize( adaptation_status::accepted, .37 + step.get_dt(), *out );
         }
         check( guarded_memory::allocation_count == allocated, "Adaptive ROS2 allocated backend memory after warmup" );
@@ -223,8 +236,10 @@ try
     auto time = std::make_shared<time_problem<space>>( ops );
     for ( const char *method : { "ROS2", "ROS3" } )
     {
-        adaptive_mode( p, false, method );
-        adaptive_mode( time, true, method );
+        adaptive_mode( p, false, method, std::false_type{} );
+        adaptive_mode( time, true, method, std::false_type{} );
+        adaptive_mode( p, false, method, std::true_type{} );
+        adaptive_mode( time, true, method, std::true_type{} );
     }
     check( time->derivatives > 0 && time->time == .37, "Guarded ROS2 omitted f_t or changed base time" );
     std::cout << "Fixed/adaptive/non-autonomous ROS2/ROS3, fixed workspace and blocked vector-sized host transfers: "

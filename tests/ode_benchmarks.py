@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run DIRK/IMEX/BDF system benchmarks with reference comparisons and plots."""
+"""Build and run DIRK/IMEX/BDF/Rosenbrock benchmarks with reference comparisons and plots."""
 
 import argparse
 from datetime import datetime
@@ -18,7 +18,9 @@ CONTROLLERS = ("matlab", "scipy", "I", "H211", "PC", "PID", "H312", "PPID", "H32
 DEFAULT_METHODS = ("SDIRK2(1)2", "SDIRK3(1)3", "IMEX_ARK324L2SA")
 FIXED_IMEX_METHODS = ("IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233")
 BDF_METHODS = ("BDF1", "BDF2", "BDF")
-METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS + BDF_METHODS
+ROSENBROCK_METHODS = ("ROS2", "ROS3")
+ROSENBROCK_SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "time_coefficient", "stiff_tracking")
+METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS + BDF_METHODS + ROSENBROCK_METHODS
 SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "coupled_mass", "state_mass",
            "time_mass", "coupled_dae", "moving_dae", "stokes_dae", "time_coefficient", "stiff_tracking")
 IMEX_SPLITS = {
@@ -115,7 +117,7 @@ def arguments(argv=None):
     parser.add_argument("--min-step", type=positive, default=1e-8)
     parser.add_argument("--max-step", type=positive, default=.05)
     parser.add_argument("--sample-step", type=positive, default=0,
-                        help="Uniform dense-output spacing for BDF or IMEX_ARK324L2SA on nonsingular-mass systems")
+                        help="Uniform dense-output spacing for BDF, IMEX_ARK324L2SA or ROS2/ROS3 on supported ODEs")
     parser.add_argument("--max-steps", type=int, default=2_000_000)
     parser.add_argument("--max-relative-error", type=positive, default=.01)
     parser.add_argument("--methods", choices=METHODS, nargs="+", default=list(DEFAULT_METHODS))
@@ -154,16 +156,18 @@ def configuration(args, system):
     if len(initial) != len(definition["labels"]) or not all(math.isfinite(value) for value in initial):
         raise ValueError("Invalid initial-state dimension or value")
     methods = [method for method in dict.fromkeys(args.methods)
-               if not method.startswith("IMEX_") or system in IMEX_SPLITS]
+               if (not method.startswith("IMEX_") or system in IMEX_SPLITS)
+               and (method not in ROSENBROCK_METHODS or system in ROSENBROCK_SYSTEMS)]
     if not methods:
-        raise ValueError(f"{system}: IMEX benchmarks do not support singular-mass DAEs; select a DIRK method")
+        raise ValueError(f"{system}: no compatible methods; IMEX excludes singular-mass DAEs; "
+                         "Rosenbrock requires identity-mass ODEs")
     if any(method in FIXED_IMEX_METHODS for method in methods) and "constant" not in args.controllers:
         raise ValueError("Fixed IMEX tables require --controllers constant (no combined embedded estimator)")
     if "BDF" in methods and not any(controller != "constant" for controller in args.controllers):
         raise ValueError("Automatic BDF requires an error-requiring controller")
-    if args.sample_step and (any(method not in (*BDF_METHODS, "IMEX_ARK324L2SA") for method in methods)
+    if args.sample_step and (any(method not in (*BDF_METHODS, "IMEX_ARK324L2SA", *ROSENBROCK_METHODS) for method in methods)
                              or system not in IMEX_SPLITS):
-        raise ValueError("Uniform dense sampling requires BDF or IMEX_ARK324L2SA on an ODE/nonsingular-mass system")
+        raise ValueError("Uniform dense sampling requires BDF, IMEX_ARK324L2SA or Rosenbrock on a supported ODE/nonsingular-mass system")
     if args.sample_step and (start + args.sample_step == start or end - args.sample_step == end):
         raise ValueError("Dense sample spacing cannot advance the time coordinate")
     cases = [dict(method=method, controller=controller,
@@ -276,7 +280,8 @@ def read_trajectory(path, config, case, sampled=False):
     for key in ("method", "controller"):
         if metadata[key] != case[key]:
             raise ValueError(f"Unexpected {key}")
-    scheme = "bdf" if case["method"] in BDF_METHODS else "imex" if case["method"].startswith("IMEX_") else "dirk"
+    scheme = ("rosenbrock" if case["method"] in ROSENBROCK_METHODS else "bdf" if case["method"] in BDF_METHODS
+              else "imex" if case["method"].startswith("IMEX_") else "dirk")
     if metadata.get("scheme", "dirk") != scheme:
         raise ValueError("Unexpected integration scheme")
     if case["method"] == "BDF":
@@ -288,8 +293,9 @@ def read_trajectory(path, config, case, sampled=False):
             raise ValueError("Invalid automatic BDF order report")
     if scheme == "imex" and (not config.get("splitting") or metadata.get("splitting") != config["splitting"]):
         raise ValueError("Inconsistent IMEX splitting metadata")
+    dense_order = 2 if case["method"] == "ROS2" else 1 if scheme == "bdf" else 3
     if sampled and (metadata.get("sampling") != "uniform_dense"
-                    or metadata.get("dense_output_order") != (1 if scheme == "bdf" else 3)
+                    or metadata.get("dense_output_order") != dense_order
                     or (scheme == "bdf" and metadata.get("dense_output_order_policy") != "used_bdf_order")
                     or metadata.get("sample_step") != config.get("sample_step") or not config.get("sample_step")):
         raise ValueError("Invalid dense sampling metadata")

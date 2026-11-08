@@ -125,10 +125,8 @@ void test_configuration()
         },
         "Non-autonomous ROS request accepted"
     );
-    throws(
-        [&] { rosenbrock::time_step<operations_type, P, controller, L, true> s( f.ops, f.p, f.adaptation, f.solver ); },
-        "Unvalidated ROS dense output accepted"
-    );
+    rosenbrock::time_step<operations_type, P, controller, L, true> dense( f.ops, f.p, f.adaptation, f.solver );
+    check( dense.dense_output_order() == 2, "ROS2 dense output order is incorrect" );
     throws( [&] { S s( nullptr, f.p, f.adaptation, f.solver ); }, "Null ROS operations accepted" );
     throws( [&] { S s( f.ops, nullptr, f.adaptation, f.solver ); }, "Null ROS problem accepted" );
     throws( [&] { S s( f.ops, f.p, nullptr, f.solver ); }, "Null ROS controller accepted" );

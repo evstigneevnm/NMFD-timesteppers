@@ -524,7 +524,7 @@ The existing apply/finalize/reset and controller interfaces remain unchanged.
 Four backend workspace vectors for ROS2, five for ROS3, are allocated once, with no dense or trajectory
 storage. Failures never publish partial output. Error-requiring controllers
 without the extended error-assessment signature report `error_estimate_unavailable`.
-`DenseOutput=true` rejects construction. `reference_time` defaults to one.
+`reference_time` defaults to one.
 Nontrivial mass, DAEs and approximate-Jacobian W schemes are not supported yet;
 the supplied problem must satisfy the documented identity-mass contract.
 
@@ -561,6 +561,25 @@ tolerance refinement and repeated trajectories. Non-autonomous tests use a
 manufactured exponential solution with stiff or time-varying Jacobians and
 exercise partial derivatives, stage timing and failed-provider rollback.
 The parent CI also runs Clang, sanitizers and available CUDA/HIP backends.
+
+With the fifth template argument `true`, ROS2/ROS3 provide borrowed dense views
+through the existing `get_continuous_integration().evaluate(theta,out)` contract.
+Their native polynomial extensions report orders two/three and preserve both
+endpoints exactly. Sampling performs backend algebra only; finalization and reset
+expire views. ROS2 adds one snapshot vector and no rates/solves. ROS3 adds two
+vectors, one endpoint rate and one solve using the same prepared operator, only
+after error acceptance. Disabled dense output adds no backend workspace, rate
+evaluations or solves.
+Classical interpolation order is not a claim of stiffness-uniform accuracy or
+positivity in unresolved initial layers. See the [derivation and limits](docs/rosenbrock_dense_output.md).
+
+The ODE validation runner accepts both methods for identity-mass systems, without
+changing its default method matrix or enabling unsupported mass/DAE cases:
+
+```sh
+bash tests/run_all.sh --systems lorenz rossler vdp vdp_stiff time_coefficient stiff_tracking \
+  --methods ROS2 ROS3 --controllers scipy --end 0.4 --sample-step 0.017
+```
 
 ## Non-Autonomous Verification
 
