@@ -525,8 +525,9 @@ Four backend workspace vectors for ROS2, five for ROS3, are allocated once, with
 storage. Failures never publish partial output. Error-requiring controllers
 without the extended error-assessment signature report `error_estimate_unavailable`.
 `reference_time` defaults to one.
-Nontrivial mass and DAEs are not supported yet; the supplied problem must satisfy
-the documented identity-mass contract. ROS2/ROS3 retain the exact-Jacobian
+The default rate path requires the documented identity-rate shifted operator.
+For autonomous constant nonsingular mass, select the residual form below.
+DAEs are not supported. ROS2/ROS3 retain the exact-Jacobian
 requirement. The separately selected W-method below permits approximations.
 
 Autonomous problems need no additional method or storage. With
@@ -621,7 +622,32 @@ same six identity-mass systems as ROS2/ROS3; default method selections are uncha
 Separate dense tests check all eight independent W conditions, interior orders,
 bounded stiff samples, exact endpoints, failed slope/rate preparation and view
 expiry. Classical continuous order does not certify stiffness-uniform accuracy
-or positivity in unresolved layers. Mass/DAE support is still excluded.
+or positivity in unresolved layers. Singular/time- or state-dependent mass
+remains unsupported.
+
+### Constant-Mass Residual Form
+
+Set `params.mass_form=true` for autonomous `M*u'=f(u)` with constant nonsingular
+M. All three tables support fixed/adaptive steps and their native dense output.
+The default is false, preserving existing rate-based execution and costs.
+No constructor, integrator, controller, solver or problem-method signatures change.
+Mass form needs only the existing shifted residual `apply`, reference buffers,
+and prepared Jacobian; `evaluate_rate` is not required or called.
+
+The problem supplies `R(U)=a*M*(U-previous_state)-b*(f(U)+known_rhs)` and the
+frozen operator `a*M-b*B`. ROS2/ROS3 require B=J_f; ROS34PW2 permits its validated
+approximation. Stage residual calls must preserve the prepared operator.
+The engine sets `known_rhs=0` and changes the reference buffer to encode the
+mass-weighted stage coupling. It neither constructs/inverts M nor requires a
+mass-action callback. See [derivation and limits](docs/rosenbrock_mass.md).
+
+Mass form performs two/three/four residuals and shifted solves for
+ROS2/ROS3/ROS34PW2. Enabled dense output adds zero/one/two residuals and solves
+after error acceptance. Storage is unchanged, with no per-step vector allocations
+or vector-sized host/device copies; sampling remains backend-only O(N) algebra.
+Non-autonomous selection is rejected explicitly: the rate-time-derivative
+callback is not a physical-force derivative. Singular and variable mass are
+not validated capabilities, even if their shifted operators happen to solve.
 
 ## Non-Autonomous Verification
 

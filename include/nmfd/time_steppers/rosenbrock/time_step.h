@@ -2,6 +2,7 @@
 #define NMFD_TIME_STEPPERS_ROSENBROCK_TIME_STEP_H
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -19,8 +20,8 @@
 
 namespace nmfd::time_steppers::rosenbrock
 {
-// Identity-mass ODEs. Only W tables permit approximate base Jacobians.
-// Rate/time-derivative evaluations must preserve the prepared shifted operator.
+// Identity-rate ODEs or opt-in autonomous constant-mass residuals. Only W
+// tables permit approximate Jacobians. Evaluations preserve the frozen operator.
 template <class VectorOperations, class Problem, class TimeStepAdaptation, class LinearSolver, bool DenseOutput = false>
 class time_step
 {
@@ -34,12 +35,12 @@ public:
         unsigned int maximum_attempts = 32;
         scalar_type  reference_time   = scalar_type( 1 );
         bool         autonomous       = true;
+        bool         mass_form        = false;
     };
 
     static_assert(
-        detail::has_implicit_stage_interface<Problem, vector_type, scalar_type>::value &&
-            detail::has_rate_evaluation<Problem, vector_type>::value,
-        "Rosenbrock requires the existing shifted-stage interface and bool evaluate_rate(state, rate)"
+        detail::has_implicit_stage_interface<Problem, vector_type, scalar_type>::value,
+        "Rosenbrock requires the existing shifted-stage interface"
     );
 
     // Allocate stage increments and two reusable scratch vectors, plus f_t only
@@ -63,6 +64,10 @@ public:
     {
         if ( !p.maximum_attempts )
             throw std::invalid_argument( "Rosenbrock requires a nonempty attempt budget" );
+        if ( p.mass_form && !p.autonomous )
+            throw std::invalid_argument( "Mass-form Rosenbrock currently requires autonomous constant mass" );
+        if ( !p.mass_form && !detail::has_rate_evaluation<Problem, vector_type>::value )
+            throw std::invalid_argument( "Rate-form Rosenbrock requires bool evaluate_rate(state, rate)" );
         if constexpr ( DenseOutput )
             if ( !table_.dense_output_order() )
                 throw std::invalid_argument( "Selected Rosenbrock method has no validated dense output" );
@@ -304,7 +309,7 @@ private:
             return false;
         for ( std::size_t i = 0; i < table_.stage_count(); ++i )
         {
-            if ( !table_.reuse_previous_rate( i ) )
+            if ( params_.mass_form || !table_.reuse_previous_rate( i ) )
             {
                 const vector_type *state = &in;
                 if ( i )
@@ -326,6 +331,15 @@ private:
                 const auto stage_time = params_.autonomous || c == 0 ? time_
                                         : c == 1 ? ( dt_ == target_ - time_ ? target_ : time_ + dt_ )
                                                  : time_ + dt_ * scalar_type( c );
+                if ( params_.mass_form )
+                {
+                    std::array<double, 4> coupling{};
+                    for ( std::size_t j = 0; j < i; ++j )
+                        coupling[j] = table_.gamma * table_.c( i, j );
+                    if ( !residual_rhs( *state, coupling ) || !solve( *increments_[i] ) )
+                        return false;
+                    continue;
+                }
                 if ( !rate( *state, stage_time ) )
                     return false;
                 if constexpr ( DenseOutput )
@@ -376,6 +390,31 @@ private:
         return true;
     }
 
+    // For R(U)=a*M*(U-previous)-b*f(U), previous=U+sum(q_j*y_j)
+    // gives -R=b*f(U)+a*M*sum(q_j*y_j), without a mass inverse or action API.
+    // apply() must not change the operator prepared at the attempt's base state.
+    bool residual_rhs( const vector_type &state, const std::array<double, 4> &coupling )
+    {
+        auto &previous = problem_->previous_state();
+        operations_->assign( state, previous );
+        for ( std::size_t j = 0; j < increments_.size(); ++j )
+            if ( coupling[j] != 0 )
+                operations_->add_lin_comb( scalar_type( coupling[j] ), *increments_[j], previous );
+        if ( !operations_->is_valid_number( previous ) )
+        {
+            status_ = single_step_status::failed_nonfinite;
+            return false;
+        }
+        problem_->apply( state, *rhs_ );
+        operations_->scale( scalar_type( -1 ), *rhs_ );
+        if ( !operations_->is_valid_number( *rhs_ ) )
+        {
+            status_ = single_step_status::failed_nonfinite;
+            return false;
+        }
+        return true;
+    }
+
     // Recompute f_t at each attempt's base point; never silently difference rates.
     bool prepare_time_derivative( const vector_type &state )
     {
@@ -399,39 +438,44 @@ private:
     // failed rates and exceptions; the shifted Jacobian stays frozen throughout.
     bool rate( const vector_type &state, scalar_type stage_time )
     {
-        if ( !std::isfinite( stage_time ) )
-        {
-            status_ = single_step_status::failed_nonfinite;
-            return false;
-        }
-        bool ok;
-        if ( stage_time == time_ )
-            ok = problem_->evaluate_rate( state, *rhs_ );
+        if constexpr ( !detail::has_rate_evaluation<Problem, vector_type>::value )
+            throw std::logic_error( "Rate evaluation is unavailable for this Rosenbrock problem" );
         else
         {
-            try
+            if ( !std::isfinite( stage_time ) )
             {
-                problem_->set_time( stage_time );
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
+            bool ok;
+            if ( stage_time == time_ )
                 ok = problem_->evaluate_rate( state, *rhs_ );
-            }
-            catch ( ... )
+            else
             {
+                try
+                {
+                    problem_->set_time( stage_time );
+                    ok = problem_->evaluate_rate( state, *rhs_ );
+                }
+                catch ( ... )
+                {
+                    problem_->set_time( time_ );
+                    throw;
+                }
                 problem_->set_time( time_ );
-                throw;
             }
-            problem_->set_time( time_ );
+            if ( !ok )
+            {
+                status_ = single_step_status::failed_solver;
+                return false;
+            }
+            if ( !operations_->is_valid_number( *rhs_ ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
+            return true;
         }
-        if ( !ok )
-        {
-            status_ = single_step_status::failed_solver;
-            return false;
-        }
-        if ( !operations_->is_valid_number( *rhs_ ) )
-        {
-            status_ = single_step_status::failed_nonfinite;
-            return false;
-        }
-        return true;
     }
 
     bool solve( vector_type &increment )
@@ -461,46 +505,64 @@ private:
     {
         if ( table_.stage_count() == 3 )
         {
-            const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
-            if ( !rate( *work_, params_.autonomous ? time_ : endpoint ) )
-                return false;
-            const auto shift =
-                detail::balanced_affine_shift( scalar_type( 1 / table_.gamma ) / dt_, params_.reference_time );
-            operations_->scale( shift.b, *rhs_ );
-            for ( std::size_t i = 0; i < increments_.size(); ++i )
-                operations_->add_lin_comb(
-                    -shift.a * scalar_type( table_.gamma * table_.m( i ) ), *increments_[i], *rhs_
-                );
-            if ( !solve( *dense_.correction ) )
-                return false;
-        }
-        else if ( table_.stage_count() == 4 && !prepare_w_dense() )
-            return false;
-        operations_->assign( in, *dense_.previous );
-        return true;
-    }
-
-    // Prepare third-order approximations to h*f0 and h*f1 using the same
-    // shifted inverse, not raw endpoint slopes. The first physical rate was
-    // retained during the ordinary stages; only f1 requires another callback.
-    bool prepare_w_dense()
-    {
-        const auto shift =
-            detail::balanced_affine_shift( scalar_type( 1 / table_.gamma ) / dt_, params_.reference_time );
-        for ( std::size_t stage = 0; stage < 2; ++stage )
-        {
-            if ( !stage )
-                operations_->assign( *dense_.correction, *rhs_ );
+            if ( params_.mass_form )
+            {
+                std::array<double, 4> coupling{};
+                for ( std::size_t i = 0; i < increments_.size(); ++i )
+                    coupling[i] = -table_.gamma * table_.m( i );
+                if ( !residual_rhs( *work_, coupling ) || !solve( *dense_.correction ) )
+                    return false;
+            }
             else
             {
                 const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
                 if ( !rate( *work_, params_.autonomous ? time_ : endpoint ) )
                     return false;
+                const auto shift =
+                    detail::balanced_affine_shift( scalar_type( 1 / table_.gamma ) / dt_, params_.reference_time );
+                operations_->scale( shift.b, *rhs_ );
+                for ( std::size_t i = 0; i < increments_.size(); ++i )
+                    operations_->add_lin_comb(
+                        -shift.a * scalar_type( table_.gamma * table_.m( i ) ), *increments_[i], *rhs_
+                    );
+                if ( !solve( *dense_.correction ) )
+                    return false;
             }
+        }
+        else if ( table_.stage_count() == 4 && !prepare_w_dense( in ) )
+            return false;
+        operations_->assign( in, *dense_.previous );
+        return true;
+    }
+
+    // Prepare third-order slope increments using the same shifted inverse.
+    // Rate form caches f0; mass form evaluates both coupled endpoint residuals.
+    bool prepare_w_dense( const vector_type &in )
+    {
+        const auto shift =
+            detail::balanced_affine_shift( scalar_type( 1 / table_.gamma ) / dt_, params_.reference_time );
+        for ( std::size_t stage = 0; stage < 2; ++stage )
+        {
             const auto &coupling = ros34pw2_dense_coupling( stage );
-            operations_->scale( shift.b, *rhs_ );
-            for ( std::size_t i = 0; i < increments_.size(); ++i )
-                operations_->add_lin_comb( shift.a * scalar_type( coupling[i] ), *increments_[i], *rhs_ );
+            if ( params_.mass_form )
+            {
+                if ( !residual_rhs( stage ? *work_ : in, coupling ) )
+                    return false;
+            }
+            else
+            {
+                if ( !stage )
+                    operations_->assign( *dense_.correction, *rhs_ );
+                else
+                {
+                    const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+                    if ( !rate( *work_, params_.autonomous ? time_ : endpoint ) )
+                        return false;
+                }
+                operations_->scale( shift.b, *rhs_ );
+                for ( std::size_t i = 0; i < increments_.size(); ++i )
+                    operations_->add_lin_comb( shift.a * scalar_type( coupling[i] ), *increments_[i], *rhs_ );
+            }
             auto &slope = stage ? *dense_.endpoint : *dense_.correction;
             if ( !solve( slope ) )
                 return false;

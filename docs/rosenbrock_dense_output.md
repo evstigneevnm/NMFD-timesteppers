@@ -1,8 +1,9 @@
 # Rosenbrock Continuous Extensions
 
 ROS2 and ROS3 use native increment polynomials, not endpoint-rate Hermite
-interpolation. This construction assumes the exact base Jacobian and identity
-mass, like the stepping engine. The original endpoint and error estimator do not
+interpolation. The derivation below assumes the exact base Jacobian and identity
+mass; autonomous constant nonsingular mass uses the equivalent
+[residual-form corrections](rosenbrock_mass.md). The original endpoint and error estimator do not
 change. Their coefficients are the [KPP increment-form tables](https://kpp.readthedocs.io/en/stable/num_methods/rosenbrock-methods.html).
 
 ## Polynomial
@@ -80,7 +81,9 @@ the classical accuracy regime. Stiff-decay interpolation is bounded as negative
 lambda*h grows; unlike raw endpoint-slope Hermite interpolation, no h*f term
 causes unbounded samples. This does not imply stiffness-uniform accuracy,
 positivity, monotonicity, or resolution of an initial layer inside a large step.
-It does not establish mass-matrix, DAE or approximate-Jacobian W support.
+The derivation alone does not establish DAE or approximate-Jacobian W support.
+The separate constant-mass extension and W-compatible interpolant have their
+own derivations and regression gates.
 
 ## Cost And Lifetime
 

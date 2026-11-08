@@ -1,4 +1,4 @@
-#include "implicit_rosenbrock_w_problem.h"
+#include "implicit_rosenbrock_mass_problem.h"
 #include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
@@ -167,7 +167,8 @@ try
             check( ops->norm( *out ) < 1e-10, "Matrix-free ROS2 output disagrees with its stability function" );
         }
     }
-    auto adaptive_mode = [&]( auto selected_problem, bool nonautonomous, const char *method, auto dense ) {
+    auto adaptive_mode = [&]( auto selected_problem, bool nonautonomous, const char *method, auto dense,
+                              bool mass_form = false ) {
         using Problem = typename decltype( selected_problem )::element_type;
         using Linear  = krylov_solver<Problem, space>;
         using Control = integration::time_step_adaptation_scipy<space>;
@@ -181,6 +182,7 @@ try
         typename Step::params sp;
         sp.method            = method;
         sp.autonomous        = !nonautonomous;
+        sp.mass_form         = mass_form;
         const auto stages    = rosenbrock::method_table( method ).stage_count();
         const auto workspace = stages + 2 + ( nonautonomous ? 1 : 0 ) + ( dense ? stages - 1 : 0 );
         const auto before    = guarded_memory::allocations.size();
@@ -252,6 +254,23 @@ try
     adaptive_mode( approximate_time, true, "ROS34PW2", std::false_type{} );
     adaptive_mode( approximate, false, "ROS34PW2", std::true_type{} );
     adaptive_mode( approximate_time, true, "ROS34PW2", std::true_type{} );
+    auto mass = std::make_shared<mass_problem<noncommuting_decay, space>>( ops );
+    for ( const char *method : { "ROS2", "ROS3", "ROS34PW2" } )
+    {
+        // ROS2/ROS3 require the exact state Jacobian; only W uses this B.
+        if ( std::string( method ) == "ROS34PW2" )
+        {
+            adaptive_mode( mass, false, method, std::false_type{}, true );
+            adaptive_mode( mass, false, method, std::true_type{}, true );
+        }
+        else
+        {
+            auto exact_mass = std::make_shared<mass_problem<coupled_decay, space>>( ops );
+            adaptive_mode( exact_mass, false, method, std::false_type{}, true );
+            adaptive_mode( exact_mass, false, method, std::true_type{}, true );
+        }
+    }
+    check( mass->residuals > 0, "Mass-form transfer guard did not exercise residual stages" );
     check( time->derivatives > 0 && time->time == .37, "Guarded ROS2 omitted f_t or changed base time" );
     std::cout
         << "Fixed/adaptive/non-autonomous ROS2/ROS3/ROS34PW2, fixed workspace and blocked vector-sized host transfers: "
