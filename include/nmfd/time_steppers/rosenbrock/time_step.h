@@ -16,8 +16,8 @@
 
 namespace nmfd::time_steppers::rosenbrock
 {
-// This initial engine supports autonomous ODEs with identity mass and an exact
-// base Jacobian. Rate evaluation must preserve the prepared shifted operator.
+// Identity-mass ODEs with an exact base Jacobian. Rate/time-derivative
+// evaluations must preserve the prepared shifted operator.
 template <class VectorOperations, class Problem, class TimeStepAdaptation, class LinearSolver, bool DenseOutput = false>
 class time_step
 {
@@ -39,8 +39,8 @@ public:
         "ROS2 requires the existing shifted-stage interface and bool evaluate_rate(state, rate)"
     );
 
-    // Retain supplied dependencies and allocate four reusable backend vectors.
-    // No nonlinear solver, mass inverse, estimator or dense storage is constructed.
+    // Allocate four reusable vectors, plus f_t only for non-autonomous problems.
+    // The embedded estimate reuses RHS scratch after both stage solves finish.
     time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
         std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<LinearSolver> solver, const params &p = {}
@@ -54,10 +54,12 @@ public:
           ),
           solver_( solver ? std::move( solver ) : throw std::invalid_argument( "ROS2 requires a linear solver" ) ),
           params_( p ), table_( p.method ), work_( *operations_ ), rhs_( *operations_ ), k1_( *operations_ ),
-          k2_( *operations_ )
+          k2_( *operations_ ), time_derivative_( *operations_ )
     {
-        if ( !p.maximum_attempts || !p.autonomous )
-            throw std::invalid_argument( "ROS2 requires a nonempty attempt budget and an autonomous problem" );
+        if ( !p.maximum_attempts )
+            throw std::invalid_argument( "ROS2 requires a nonempty attempt budget" );
+        if ( !p.autonomous && !detail::has_time_derivative_evaluation<Problem, vector_type>::value )
+            throw std::invalid_argument( "Non-autonomous ROS2 requires bool evaluate_time_derivative(state, out)" );
         if constexpr ( DenseOutput )
             throw std::invalid_argument( "ROS2 dense output is not implemented" );
         detail::balanced_affine_shift( scalar_type( 0 ), p.reference_time );
@@ -65,6 +67,11 @@ public:
         {
             v->init();
             v->start_use();
+        }
+        if ( !p.autonomous )
+        {
+            time_derivative_.init();
+            time_derivative_.start_use();
         }
     }
 
@@ -119,8 +126,9 @@ public:
     void apply( const vector_type &in, vector_type &out )
     {
         require_finalized();
-        attempts_ = 0;
-        if ( adaptation_->requires_error_estimate() )
+        attempts_       = 0;
+        estimate_error_ = adaptation_->requires_error_estimate();
+        if ( estimate_error_ && !detail::has_embedded_assessment<TimeStepAdaptation, vector_type, scalar_type>::value )
         {
             status_ = single_step_status::error_estimate_unavailable;
             return;
@@ -158,7 +166,7 @@ public:
                 continue;
             }
             scalar_type next_dt  = proposed;
-            const auto  decision = adaptation_->assess( time_, dt_, in, *work_, next_dt );
+            const auto  decision = assess( in, next_dt );
             if ( decision == adaptation_status::accepted )
             {
                 operations_->assign( *work_, out );
@@ -198,16 +206,24 @@ private:
     std::shared_ptr<LinearSolver>       solver_;
     params                              params_;
     coefficients                        table_;
-    vector_wrap_type                    work_, rhs_, k1_, k2_;
+    vector_wrap_type                    work_, rhs_, k1_, k2_, time_derivative_;
     scalar_type                         time_ = 0, target_ = 1, dt_ = 0;
     unsigned int                        attempts_    = 0;
-    bool                                initialized_ = false, pending_ = false;
+    bool                                initialized_ = false, pending_ = false, estimate_error_ = false;
     single_step_status                  status_ = single_step_status::idle;
 
     void require_finalized() const
     {
         if ( pending_ )
             throw std::logic_error( "Finalize the pending ROS2 step first" );
+    }
+
+    adaptation_status assess( const vector_type &in, scalar_type &next_dt )
+    {
+        if constexpr ( detail::has_embedded_assessment<TimeStepAdaptation, vector_type, scalar_type>::value )
+            if ( estimate_error_ )
+                return adaptation_->assess( time_, dt_, in, *work_, next_dt, table_.error_order, &*rhs_ );
+        return adaptation_->assess( time_, dt_, in, *work_, next_dt );
     }
 
     // Scale A and both stage right-hand sides together. The coupling b*c21/h
@@ -230,9 +246,11 @@ private:
         if ( !jacobian )
             throw std::invalid_argument( "ROS2 requires a prepared Jacobian" );
         solver_->set_operator( std::move( jacobian ) );
-        if ( !rate( in ) )
+        if ( !prepare_time_derivative( in ) || !rate( in, time_ ) )
             return false;
         operations_->scale( shift.b, *rhs_ );
+        if ( !params_.autonomous )
+            operations_->add_lin_comb( shift.b * dt_ * scalar_type( table_.gamma1 ), *time_derivative_, *rhs_ );
         if ( !solve( *k1_ ) )
             return false;
         operations_->assign_lin_comb( scalar_type( 1 ), in, scalar_type( table_.a21 ), *k1_, *work_ );
@@ -241,9 +259,12 @@ private:
             status_ = single_step_status::failed_nonfinite;
             return false;
         }
-        if ( !rate( *work_ ) )
+        const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+        if ( !rate( *work_, params_.autonomous ? time_ : endpoint ) )
             return false;
         operations_->scale( shift.b, *rhs_ );
+        if ( !params_.autonomous )
+            operations_->add_lin_comb( shift.b * dt_ * scalar_type( table_.gamma2 ), *time_derivative_, *rhs_ );
         operations_->add_lin_comb( shift.a * scalar_type( table_.gamma * table_.c21 ), *k1_, *rhs_ );
         if ( !solve( *k2_ ) )
             return false;
@@ -254,12 +275,65 @@ private:
             status_ = single_step_status::failed_nonfinite;
             return false;
         }
+        if ( estimate_error_ )
+        {
+            // k_i are state increments, so the error already contains h.
+            operations_->assign_lin_comb( scalar_type( table_.e1 ), *k1_, scalar_type( table_.e2 ), *k2_, *rhs_ );
+            if ( !operations_->is_valid_number( *rhs_ ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
+        }
         return true;
     }
 
-    bool rate( const vector_type &state )
+    // Recompute f_t at each attempt's base point; never silently difference rates.
+    bool prepare_time_derivative( const vector_type &state )
     {
-        if ( !problem_->evaluate_rate( state, *rhs_ ) )
+        if ( params_.autonomous )
+            return true;
+        if constexpr ( detail::has_time_derivative_evaluation<Problem, vector_type>::value )
+            if ( !problem_->evaluate_time_derivative( state, *time_derivative_ ) )
+            {
+                status_ = single_step_status::failed_solver;
+                return false;
+            }
+        if ( !operations_->is_valid_number( *time_derivative_ ) )
+        {
+            status_ = single_step_status::failed_nonfinite;
+            return false;
+        }
+        return true;
+    }
+
+    // Restore base time after the non-autonomous endpoint evaluation, including
+    // failed rates and exceptions; the shifted Jacobian stays frozen throughout.
+    bool rate( const vector_type &state, scalar_type stage_time )
+    {
+        if ( !std::isfinite( stage_time ) )
+        {
+            status_ = single_step_status::failed_nonfinite;
+            return false;
+        }
+        bool ok;
+        if ( stage_time == time_ )
+            ok = problem_->evaluate_rate( state, *rhs_ );
+        else
+        {
+            try
+            {
+                problem_->set_time( stage_time );
+                ok = problem_->evaluate_rate( state, *rhs_ );
+            }
+            catch ( ... )
+            {
+                problem_->set_time( time_ );
+                throw;
+            }
+            problem_->set_time( time_ );
+        }
+        if ( !ok )
         {
             status_ = single_step_status::failed_solver;
             return false;

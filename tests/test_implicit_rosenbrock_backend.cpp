@@ -1,4 +1,5 @@
-#include "implicit_rosenbrock_test.h"
+#include "implicit_rosenbrock_time_problem.h"
+#include <nmfd/time_steppers/integration/time_step_adaptation_scipy.h>
 #include <cstdint>
 #include <map>
 
@@ -150,8 +151,67 @@ try
         ops->add_mul_scalar( -exact, 1., *out );
         check( ops->norm( *out ) < 1e-10, "Matrix-free ROS2 output disagrees with its stability function" );
     }
-    std::cout << "ROS2 matrix-free GMRES, fixed workspace and blocked vector-sized host transfers: " << checks
-              << " checks PASS\n";
+    auto adaptive_mode = [&]( auto selected_problem, bool nonautonomous ) {
+        using Problem = typename decltype( selected_problem )::element_type;
+        using Linear  = krylov_solver<Problem, space>;
+        using Control = integration::time_step_adaptation_scipy<space>;
+        using Step    = rosenbrock::time_step<space, Problem, Control, Linear>;
+        typename Control::params cp;
+        cp.relative_tolerance = 1e-4;
+        cp.absolute_tolerance = 1e-6;
+        cp.initial_step = cp.maximum_step = .02;
+        auto                  control     = std::make_shared<Control>( ops, cp );
+        auto                  solver      = make_krylov<Linear>( ops );
+        typename Step::params sp;
+        sp.autonomous     = !nonautonomous;
+        const auto before = guarded_memory::allocations.size();
+        for ( unsigned int i = 1; i <= ( nonautonomous ? 5u : 4u ); ++i )
+        {
+            ops->fail_activation = ops->activations + i;
+            bool failed          = false;
+            try
+            {
+                Step invalid( ops, selected_problem, control, solver, sp );
+            }
+            catch ( const std::runtime_error & )
+            {
+                failed = true;
+            }
+            check(
+                failed && guarded_memory::allocations.size() == before,
+                "Partial adaptive/non-autonomous ROS2 construction leaked workspace"
+            );
+        }
+        ops->fail_activation = 0;
+        Step step( ops, selected_problem, control, solver, sp );
+        check(
+            guarded_memory::allocations.size() == before + ( nonautonomous ? 5 : 4 ),
+            "Adaptive ROS2 allocated an unnecessary error or time-derivative vector"
+        );
+        ops->assign_scalar( std::exp( .74 ), *state );
+        step.set_time( .37 );
+        step.set_target_time( .39 );
+        step.apply( *state, *out );
+        check( step.get_status() == single_step_status::converged, "Guarded adaptive ROS2 warmup failed" );
+        step.finalize( adaptation_status::accepted, .37 + step.get_dt(), *out );
+        const auto allocated = guarded_memory::allocation_count;
+        for ( unsigned int repeat = 0; repeat < 3; ++repeat )
+        {
+            step.reset();
+            step.set_time( .37 );
+            step.set_target_time( .39 );
+            step.apply( *state, *out );
+            check( step.get_status() == single_step_status::converged, "Guarded adaptive ROS2 restart failed" );
+            step.finalize( adaptation_status::accepted, .37 + step.get_dt(), *out );
+        }
+        check( guarded_memory::allocation_count == allocated, "Adaptive ROS2 allocated backend memory after warmup" );
+    };
+    adaptive_mode( p, false );
+    auto time = std::make_shared<time_problem<space>>( ops );
+    adaptive_mode( time, true );
+    check( time->derivatives > 0 && time->time == .37, "Guarded ROS2 omitted f_t or changed base time" );
+    std::cout << "Fixed/adaptive/non-autonomous ROS2, fixed workspace and blocked vector-sized host transfers: "
+              << checks << " checks PASS\n";
 }
 catch ( const std::exception &e )
 {

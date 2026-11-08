@@ -489,11 +489,13 @@ make -j2 test_imex_cuda CUDA_ARCH=75
 
 ## Rosenbrock ROS2
 
-`rosenbrock/time_step.h` provides fixed-step ROS2 for autonomous identity-mass
+`rosenbrock/time_step.h` provides fixed/adaptive ROS2 for identity-mass
 ODEs. Its separate `rosenbrock/coefficients.h` stores the increment-form
 [ROS2 coefficients](https://kpp.readthedocs.io/en/stable/num_methods/rosenbrock-methods.html#ros-2).
-The primary method is second order and L-stable. Embedding metadata is present,
-but embedded adaptation and dense output are not implemented in this increment.
+The primary method is second order and L-stable, with a first-order embedding.
+MATLAB, SciPy and all seven digital-filter controllers use the state error
+`e1*k1+e2*k2` with exponent two; the increments already include the step size.
+The estimator reuses RHS scratch after both stages and allocates no extra vector.
 
 ```cpp
 using step_type = nmfd::time_steppers::rosenbrock::time_step<
@@ -511,12 +513,28 @@ solves use that same balanced shifted operator; stage-rate calls must preserve
 its prepared data. Changed steps always reprepare/rebind the operator.
 
 The existing apply/finalize/reset and controller interfaces remain unchanged.
-Four backend workspace vectors are allocated once, with no estimator, dense or
-trajectory storage. Failures never publish partial output. Error-requiring
-controllers report `error_estimate_unavailable`; `DenseOutput=true` and
-`params.autonomous=false` reject construction. `reference_time` defaults to one.
+Four backend workspace vectors are allocated once, with no dense or trajectory
+storage. Failures never publish partial output. Error-requiring controllers
+without the extended error-assessment signature report `error_estimate_unavailable`.
+`DenseOutput=true` rejects construction. `reference_time` defaults to one.
 Nontrivial mass, DAEs and approximate-Jacobian W schemes are not supported yet;
 the supplied problem must satisfy the documented identity-mass contract.
+
+Autonomous problems need no additional method or storage. With
+`params.autonomous=false`, the problem must additionally provide:
+
+```cpp
+bool evaluate_time_derivative(const vector_type& state, vector_type& out);
+```
+
+This is the partial derivative of the physical rate with respect to time at
+fixed state, evaluated at the current `set_time()` value. It must not change
+the state, stage buffers or prepared Jacobian. A false result requests bounded
+rejection, nonfinite results are rejected, and exceptions propagate. Missing
+support rejects construction; no finite-difference or zero approximation is
+silently substituted. One additional backend vector retains the base derivative
+for both stages. Stage two evaluates the rate at the actual endpoint, including
+clipped/backward steps, then restores base time even on failure or exception.
 
 ```sh
 make -j2 test_rosenbrock_cpu check_headers_cpu
@@ -528,6 +546,10 @@ coupled GMRES/direct solves, stiff damping, small/large shifts, stage/rate
 failures, bounded retries, backward steps, modified endpoints, ownership and
 partial-construction cleanup. An 8192-component backend test guards both bulk
 transfer paths and verifies fixed workspace with no allocations after warmup.
+Adaptive tests cover all controllers, primary/embedded state differences,
+tolerance refinement and repeated trajectories. Non-autonomous tests use a
+manufactured exponential solution with stiff or time-varying Jacobians and
+exercise partial derivatives, stage timing and failed-provider rollback.
 The parent CI also runs Clang, sanitizers and available CUDA/HIP backends.
 
 ## Non-Autonomous Verification

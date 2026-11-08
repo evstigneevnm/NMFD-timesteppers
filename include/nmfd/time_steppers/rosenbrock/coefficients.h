@@ -9,7 +9,8 @@ namespace nmfd::time_steppers::rosenbrock
 {
 // ROS2 in the increment formulation documented by KPP:
 // https://kpp.readthedocs.io/en/stable/num_methods/rosenbrock-methods.html#ros-2
-// A*k1=f(u), A*k2=f(u+a21*k1)+(c21/h)*k1, A=I/(gamma*h)-J.
+// A*k1=f(t,u)+h*gamma1*f_t, A*k2=f(t+h,u+a21*k1)+(c21/h)*k1+h*gamma2*f_t.
+// A=I/(gamma*h)-J(t,u); f_t is the partial derivative at the base time/state.
 struct coefficients
 {
     static constexpr unsigned int stages = 2, order = 2, embedded_order = 1;
@@ -17,6 +18,8 @@ struct coefficients
     const double                  a21 = 1 / gamma, c21 = -2 / gamma;
     const double                  m1 = 3 / ( 2 * gamma ), m2 = 1 / ( 2 * gamma );
     const double                  e1 = 1 / ( 2 * gamma ), e2 = 1 / ( 2 * gamma );
+    const double                  gamma1 = gamma, gamma2 = -gamma;
+    static constexpr unsigned int error_order = embedded_order + 1;
 
     explicit coefficients( const std::string &method = "ROS2" )
     {

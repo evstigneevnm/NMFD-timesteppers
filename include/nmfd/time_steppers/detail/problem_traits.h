@@ -40,6 +40,23 @@ struct has_embedded_assessment : std::false_type
 {
 };
 
+template <class Problem, class Vector, class = void>
+struct has_time_derivative_evaluation : std::false_type
+{
+};
+
+template <class Problem, class Vector>
+struct has_time_derivative_evaluation<
+    Problem, Vector,
+    std::void_t<decltype( std::declval<Problem &>()
+                              .evaluate_time_derivative( std::declval<const Vector &>(), std::declval<Vector &>() ) )>>
+    : std::is_same<
+          decltype( std::declval<Problem &>()
+                        .evaluate_time_derivative( std::declval<const Vector &>(), std::declval<Vector &>() ) ),
+          bool>
+{
+};
+
 template <class Adaptation, class Vector, class T>
 struct has_embedded_assessment<
     Adaptation, Vector, T,
