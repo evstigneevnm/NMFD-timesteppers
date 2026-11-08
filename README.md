@@ -594,7 +594,7 @@ and solver binding still occur on every attempt; changed timesteps must update
 the shift even when B is reused. Linear-solve failures are still failures.
 
 All existing controllers use the combined state defect with exponent three.
-Each successful attempt uses four rates, four solves and one operator binding.
+Without dense output, each successful attempt uses four rates, four solves and one operator binding.
 Six backend workspace vectors are allocated once, seven for non-autonomous runs;
 there is no per-step vector allocation or vector-sized host/device transfer.
 Classical W order does not guarantee stability for an arbitrary approximation.
@@ -602,14 +602,26 @@ The physical rate and partial time derivative must not be approximated merely
 because the stage Jacobian is approximate.
 
 `table().supports_approximate_jacobian()` reports this validated capability.
-W-compatible dense output is a separate increment: `DenseOutput=true` rejects
-ROS34PW2 before allocating backend workspace. Neither the ROS3 interpolant nor
-the published exact-Jacobian continuous extension is silently reused. See
+`DenseOutput=true` enables a separately derived third-order W-compatible
+continuous extension through the existing borrowed view. After error acceptance,
+two extra solves prepare native slope increments with the same frozen operator;
+only one additional endpoint rate is evaluated. Three additional backend vectors
+retain the input and slopes; the first slope buffer also caches the original
+base rate. Error-rejected trials skip dense-only solves and endpoint-rate work.
+Sampling invokes no callbacks or solves, and finalize/reset expires views.
+Endpoints are copied exactly and the primary/embedded formulas are unchanged.
+This is not the ROS3 or published exact-Jacobian interpolant. See
 [coefficient conversion, order conditions and limits](docs/rosenbrock_w_methods.md).
 Separate W tests cover the original table, nonlinear and noncommuting systems,
 zero/perturbed/lagged approximations, all controllers, non-autonomous backward
 integration, fourth-stage failures, retry shifts and modified commits. They run
 through the existing Rosenbrock CPU/OpenMP/CUDA targets and parent CI.
+The visual runner accepts `--methods ROS34PW2 --sample-step 0.017` for the
+same six identity-mass systems as ROS2/ROS3; default method selections are unchanged.
+Separate dense tests check all eight independent W conditions, interior orders,
+bounded stiff samples, exact endpoints, failed slope/rate preparation and view
+expiry. Classical continuous order does not certify stiffness-uniform accuracy
+or positivity in unresolved layers. Mass/DAE support is still excluded.
 
 ## Non-Autonomous Verification
 

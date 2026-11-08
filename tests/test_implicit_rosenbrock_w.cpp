@@ -39,7 +39,7 @@ void test_table_and_w_conditions()
     const rosenbrock::method_table table( "ROS34PW2" );
     check(
         table.stage_count() == 4 && table.order() == 3 && table.embedded_order() == 2 && table.error_order() == 3 &&
-            table.supports_approximate_jacobian() && !table.dense_output_order(),
+            table.supports_approximate_jacobian() && table.dense_output_order() == 3,
         "W table capabilities are incorrect"
     );
     matrix g{}, a{};
@@ -115,16 +115,11 @@ void test_table_and_w_conditions()
         }
         check( rejected, "W table accepted an invalid stage index" );
     }
-    bool rejected = false;
-    try
-    {
-        rosenbrock::continuous_weights( table, .5 );
-    }
-    catch ( const std::invalid_argument & )
-    {
-        rejected = true;
-    }
-    check( rejected, "W method silently borrowed an unvalidated dense polynomial" );
+    const auto weights = rosenbrock::continuous_weights( table, .5 );
+    check(
+        std::all_of( weights.begin(), weights.end(), []( double value ) { return value == 0; } ),
+        "W secant correction is inconsistent at the midpoint"
+    );
 }
 
 template <class P, bool Krylov = false>

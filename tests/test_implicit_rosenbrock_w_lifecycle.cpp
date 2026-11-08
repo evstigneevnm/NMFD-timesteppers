@@ -200,17 +200,9 @@ void adaptive_recovery()
         limited.get_status() == single_step_status::attempt_limit_reached && f.value( *f.out ) == 42,
         "W attempt exhaustion published a candidate"
     );
-    using Dense   = rosenbrock::time_step<operations_type, P, adaptation_type, L, true>;
-    bool rejected = false;
-    try
-    {
-        Dense invalid( f.ops, f.p, std::make_shared<adaptation_type>(), f.linear, Dense::params{ "ROS34PW2" } );
-    }
-    catch ( const std::invalid_argument & )
-    {
-        rejected = true;
-    }
-    check( rejected, "W stepping silently enabled unvalidated dense output" );
+    using Dense = rosenbrock::time_step<operations_type, P, adaptation_type, L, true>;
+    Dense dense( f.ops, f.p, std::make_shared<adaptation_type>(), f.linear, Dense::params{ "ROS34PW2" } );
+    check( dense.dense_output_order() == 3, "W continuous order is not advertised" );
 }
 
 int main()

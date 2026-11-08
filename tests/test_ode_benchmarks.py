@@ -106,11 +106,11 @@ class BenchmarkAssemblyTests(unittest.TestCase):
             self.assertEqual(len(config["cases"]), 5)
 
     def test_rosenbrock_selects_only_identity_mass_systems_and_supports_dense_sampling(self):
-        args = self.args("--methods", "ROS2", "ROS3", "--controllers", "constant", "scipy", "--sample-step", ".017")
+        args = self.args("--methods", "ROS2", "ROS3", "ROS34PW2", "--controllers", "constant", "scipy", "--sample-step", ".017")
         for system in runner.ROSENBROCK_SYSTEMS:
             config = runner.configuration(args, system)
             self.assertEqual(config["sample_step"], .017)
-            self.assertEqual(len(config["cases"]), 4)
+            self.assertEqual(len(config["cases"]), 6)
             self.assertEqual(config["skipped_methods"], [])
         for system in set(runner.SYSTEMS) - set(runner.ROSENBROCK_SYSTEMS):
             with self.assertRaisesRegex(ValueError, "identity-mass"):
@@ -359,7 +359,7 @@ class BenchmarkDiagnosticsTests(unittest.TestCase):
             runner.read_trajectory(self.path, self.config, self.case)
 
     def test_rosenbrock_dense_metadata_uses_the_selected_continuous_order(self):
-        for method, order in (("ROS2", 2), ("ROS3", 3)):
+        for method, order in (("ROS2", 2), ("ROS3", 3), ("ROS34PW2", 3)):
             self.case["method"] = method
             self.config["sample_step"] = .1
             self.metadata.update(method=method, scheme="rosenbrock", sampling="uniform_dense", sample_step=.1,

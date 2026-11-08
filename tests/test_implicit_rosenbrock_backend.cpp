@@ -182,7 +182,7 @@ try
         sp.method            = method;
         sp.autonomous        = !nonautonomous;
         const auto stages    = rosenbrock::method_table( method ).stage_count();
-        const auto workspace = stages + 2 + ( nonautonomous ? 1 : 0 ) + ( dense ? ( stages == 2 ? 1 : 2 ) : 0 );
+        const auto workspace = stages + 2 + ( nonautonomous ? 1 : 0 ) + ( dense ? stages - 1 : 0 );
         const auto before    = guarded_memory::allocations.size();
         for ( unsigned int i = 1; i <= workspace; ++i )
         {
@@ -250,21 +250,8 @@ try
     auto approximate_time     = std::make_shared<w_time_problem<space>>( ops );
     adaptive_mode( approximate, false, "ROS34PW2", std::false_type{} );
     adaptive_mode( approximate_time, true, "ROS34PW2", std::false_type{} );
-    const auto before      = guarded_memory::allocations.size();
-    bool       unsupported = false;
-    try
-    {
-        using Dense = rosenbrock::time_step<space, P, C, L, true>;
-        Dense invalid( ops, p, control, linear, Dense::params{ "ROS34PW2" } );
-    }
-    catch ( const std::invalid_argument & )
-    {
-        unsupported = true;
-    }
-    check(
-        unsupported && guarded_memory::allocations.size() == before,
-        "Unsupported W dense output allocated backend workspace"
-    );
+    adaptive_mode( approximate, false, "ROS34PW2", std::true_type{} );
+    adaptive_mode( approximate_time, true, "ROS34PW2", std::true_type{} );
     check( time->derivatives > 0 && time->time == .37, "Guarded ROS2 omitted f_t or changed base time" );
     std::cout
         << "Fixed/adaptive/non-autonomous ROS2/ROS3/ROS34PW2, fixed workspace and blocked vector-sized host transfers: "

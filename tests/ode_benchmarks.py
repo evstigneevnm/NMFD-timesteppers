@@ -18,7 +18,7 @@ CONTROLLERS = ("matlab", "scipy", "I", "H211", "PC", "PID", "H312", "PPID", "H32
 DEFAULT_METHODS = ("SDIRK2(1)2", "SDIRK3(1)3", "IMEX_ARK324L2SA")
 FIXED_IMEX_METHODS = ("IMEX_EULER", "IMEX_HEUN_TR2", "IMEX_ARS222", "IMEX_ARS233")
 BDF_METHODS = ("BDF1", "BDF2", "BDF")
-ROSENBROCK_METHODS = ("ROS2", "ROS3")
+ROSENBROCK_METHODS = ("ROS2", "ROS3", "ROS34PW2")
 ROSENBROCK_SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "time_coefficient", "stiff_tracking")
 METHODS = DEFAULT_METHODS + FIXED_IMEX_METHODS + BDF_METHODS + ROSENBROCK_METHODS
 SYSTEMS = ("lorenz", "rossler", "vdp", "vdp_stiff", "coupled_mass", "state_mass",
@@ -117,7 +117,7 @@ def arguments(argv=None):
     parser.add_argument("--min-step", type=positive, default=1e-8)
     parser.add_argument("--max-step", type=positive, default=.05)
     parser.add_argument("--sample-step", type=positive, default=0,
-                        help="Uniform dense-output spacing for BDF, IMEX_ARK324L2SA or ROS2/ROS3 on supported ODEs")
+                        help="Uniform dense-output spacing for BDF, IMEX_ARK324L2SA or Rosenbrock/W on supported ODEs")
     parser.add_argument("--max-steps", type=int, default=2_000_000)
     parser.add_argument("--max-relative-error", type=positive, default=.01)
     parser.add_argument("--methods", choices=METHODS, nargs="+", default=list(DEFAULT_METHODS))

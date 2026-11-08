@@ -332,7 +332,7 @@ int select_method(
     const std::string &controller
 )
 {
-    if ( method == "ROS2" || method == "ROS3" )
+    if ( method == "ROS2" || method == "ROS3" || method == "ROS34PW2" )
     {
         if constexpr ( benchmark_supports_rosenbrock<Equation> )
         {

@@ -92,10 +92,15 @@ public:
         {
             dense_.previous.init();
             dense_.previous.start_use();
-            if ( table_.stage_count() == 3 )
+            if ( table_.stage_count() >= 3 )
             {
                 dense_.correction.init();
                 dense_.correction.start_use();
+            }
+            if ( table_.stage_count() == 4 )
+            {
+                dense_.endpoint.init();
+                dense_.endpoint.start_use();
             }
         }
     }
@@ -323,6 +328,9 @@ private:
                                                  : time_ + dt_ * scalar_type( c );
                 if ( !rate( *state, stage_time ) )
                     return false;
+                if constexpr ( DenseOutput )
+                    if ( table_.stage_count() == 4 && i == 0 )
+                        operations_->assign( *rhs_, *dense_.correction );
                 // Once the stage state has been consumed, work_ can retain its
                 // unshifted rate for consecutive stages sharing that state/time.
                 if ( i + 1 < table_.stage_count() && table_.reuse_previous_rate( i + 1 ) )
@@ -447,8 +455,8 @@ private:
         return true;
     }
 
-    // Only accepted numerical candidates pay for the ROS3 endpoint defect solve.
-    // Balanced increment sums avoid subtracting nearly equal endpoint states.
+    // Dense-only solves run after error acceptance; the numerical endpoint and
+    // frozen operator are unchanged. Preserve the base state before publication.
     bool prepare_dense( const vector_type &in )
     {
         if ( table_.stage_count() == 3 )
@@ -466,7 +474,45 @@ private:
             if ( !solve( *dense_.correction ) )
                 return false;
         }
+        else if ( table_.stage_count() == 4 && !prepare_w_dense() )
+            return false;
         operations_->assign( in, *dense_.previous );
+        return true;
+    }
+
+    // Prepare third-order approximations to h*f0 and h*f1 using the same
+    // shifted inverse, not raw endpoint slopes. The first physical rate was
+    // retained during the ordinary stages; only f1 requires another callback.
+    bool prepare_w_dense()
+    {
+        const auto shift =
+            detail::balanced_affine_shift( scalar_type( 1 / table_.gamma ) / dt_, params_.reference_time );
+        for ( std::size_t stage = 0; stage < 2; ++stage )
+        {
+            if ( !stage )
+                operations_->assign( *dense_.correction, *rhs_ );
+            else
+            {
+                const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
+                if ( !rate( *work_, params_.autonomous ? time_ : endpoint ) )
+                    return false;
+            }
+            const auto &coupling = ros34pw2_dense_coupling( stage );
+            operations_->scale( shift.b, *rhs_ );
+            for ( std::size_t i = 0; i < increments_.size(); ++i )
+                operations_->add_lin_comb( shift.a * scalar_type( coupling[i] ), *increments_[i], *rhs_ );
+            auto &slope = stage ? *dense_.endpoint : *dense_.correction;
+            if ( !solve( slope ) )
+                return false;
+            for ( std::size_t i = 0; i < increments_.size(); ++i )
+                operations_->add_lin_comb( -scalar_type( coupling[i] ), *increments_[i], slope );
+            operations_->scale( scalar_type( 1 / table_.gamma ), slope );
+            if ( !operations_->is_valid_number( slope ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
+        }
         return true;
     }
 
@@ -487,6 +533,12 @@ private:
                 operations_->add_lin_comb( weights[i], *increments_[i], out );
             if ( table_.stage_count() == 3 )
                 operations_->add_lin_comb( weights[3], *dense_.correction, out );
+            else if ( table_.stage_count() == 4 )
+            {
+                const auto factor = theta * ( 1 - theta );
+                operations_->add_lin_comb( factor * ( 1 - theta ), *dense_.correction, out );
+                operations_->add_lin_comb( -factor * theta, *dense_.endpoint, out );
+            }
         }
         return theta == 1 ? ( dt_ == target_ - time_ ? target_ : time_ + dt_ ) : time_ + theta * dt_;
     }
