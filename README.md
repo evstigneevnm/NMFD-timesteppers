@@ -487,15 +487,21 @@ make -j2 test_imex_cpu
 make -j2 test_imex_cuda CUDA_ARCH=75
 ```
 
-## Rosenbrock ROS2
+## Rosenbrock ROS2/ROS3
 
-`rosenbrock/time_step.h` provides fixed/adaptive ROS2 for identity-mass
+`rosenbrock/time_step.h` provides fixed/adaptive ROS2 and ROS3 for identity-mass
 ODEs. Its separate `rosenbrock/coefficients.h` stores the increment-form
 [ROS2 coefficients](https://kpp.readthedocs.io/en/stable/num_methods/rosenbrock-methods.html#ros-2).
-The primary method is second order and L-stable, with a first-order embedding.
-MATLAB, SciPy and all seven digital-filter controllers use the state error
-`e1*k1+e2*k2` with exponent two; the increments already include the step size.
-The estimator reuses RHS scratch after both stages and allocates no extra vector.
+Select `params.method="ROS2"` (default, order 2/1) or `"ROS3"` (order 3/2).
+Both are L-stable. ROS3 uses the full-precision constants from
+[KPP's Ros3 routine](https://github.com/KineticPreProcessor/KPP/blob/main/int/rosenbrock.f90),
+not the rounded documentation table. MATLAB, SciPy and all seven digital-filter
+controllers use `sum(e_i*k_i)` with exponent two for ROS2, three for ROS3;
+increments already include the step size. Estimation reuses RHS scratch.
+`table()` returns a method-neutral `method_table` with `stage_count()`, `order()`,
+`embedded_order()`, `error_order()` and zero-based coefficient accessors.
+The original standalone ROS2 `coefficients` descriptor is unchanged, and
+`table().gamma` remains available.
 
 ```cpp
 using step_type = nmfd::time_steppers::rosenbrock::time_step<
@@ -508,12 +514,14 @@ The solver supplies `set_operator(shared_jacobian)` and `bool solve(rhs,out)`;
 no nonlinear solver is constructed, and public Rosenbrock headers do not include
 NMFD-newton or a particular linear solver.
 For each attempt, the engine sets the previous state to its input, zeros the
-known RHS and freezes the exact Jacobian at the base time/state. Both stage
+known RHS and freezes the exact Jacobian at the base time/state. All stage
 solves use that same balanced shifted operator; stage-rate calls must preserve
-its prepared data. Changed steps always reprepare/rebind the operator.
+its prepared data. ROS2 has two stages; ROS3 has three, reusing the second rate
+in stage three. Both evaluate two rates. Changed steps always reprepare/rebind
+the operator.
 
 The existing apply/finalize/reset and controller interfaces remain unchanged.
-Four backend workspace vectors are allocated once, with no dense or trajectory
+Four backend workspace vectors for ROS2, five for ROS3, are allocated once, with no dense or trajectory
 storage. Failures never publish partial output. Error-requiring controllers
 without the extended error-assessment signature report `error_estimate_unavailable`.
 `DenseOutput=true` rejects construction. `reference_time` defaults to one.
@@ -533,15 +541,17 @@ the state, stage buffers or prepared Jacobian. A false result requests bounded
 rejection, nonfinite results are rejected, and exceptions propagate. Missing
 support rejects construction; no finite-difference or zero approximation is
 silently substituted. One additional backend vector retains the base derivative
-for both stages. Stage two evaluates the rate at the actual endpoint, including
-clipped/backward steps, then restores base time even on failure or exception.
+for all stages. Stage two evaluates the rate at the endpoint for ROS2 or at
+`t+gamma*h` for ROS3, using the actual clipped/backward step. Base time is
+restored even on failure or exception. ROS3's third stage reuses that rate
+without another evaluation or dedicated rate-cache vector.
 
 ```sh
 make -j2 test_rosenbrock_cpu check_headers_cpu
 make -j2 test_rosenbrock_cuda CUDA_ARCH=75
 ```
 
-Separate tests cover analytical linear/nonlinear second-order convergence,
+Separate tests cover analytical linear/nonlinear primary and embedded orders,
 coupled GMRES/direct solves, stiff damping, small/large shifts, stage/rate
 failures, bounded retries, backward steps, modified endpoints, ownership and
 partial-construction cleanup. An 8192-component backend test guards both bulk

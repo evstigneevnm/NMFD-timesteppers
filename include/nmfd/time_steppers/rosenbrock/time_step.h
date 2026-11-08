@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 #include <nmfd/detail/vector_wrap.h>
 #include <nmfd/time_steppers/detail/affine_shift.h>
 #include <nmfd/time_steppers/detail/problem_traits.h>
@@ -36,37 +37,48 @@ public:
     static_assert(
         detail::has_implicit_stage_interface<Problem, vector_type, scalar_type>::value &&
             detail::has_rate_evaluation<Problem, vector_type>::value,
-        "ROS2 requires the existing shifted-stage interface and bool evaluate_rate(state, rate)"
+        "Rosenbrock requires the existing shifted-stage interface and bool evaluate_rate(state, rate)"
     );
 
-    // Allocate four reusable vectors, plus f_t only for non-autonomous problems.
-    // The embedded estimate reuses RHS scratch after both stage solves finish.
+    // Allocate stage increments and two reusable scratch vectors, plus f_t only
+    // for non-autonomous problems. Estimation and shared rates reuse scratch.
     time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
         std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<LinearSolver> solver, const params &p = {}
     )
         : operations_(
-              operations ? std::move( operations ) : throw std::invalid_argument( "ROS2 requires operations" )
+              operations ? std::move( operations ) : throw std::invalid_argument( "Rosenbrock requires operations" )
           ),
-          problem_( problem ? std::move( problem ) : throw std::invalid_argument( "ROS2 requires a problem" ) ),
+          problem_( problem ? std::move( problem ) : throw std::invalid_argument( "Rosenbrock requires a problem" ) ),
           adaptation_(
-              adaptation ? std::move( adaptation ) : throw std::invalid_argument( "ROS2 requires adaptation" )
+              adaptation ? std::move( adaptation ) : throw std::invalid_argument( "Rosenbrock requires adaptation" )
           ),
-          solver_( solver ? std::move( solver ) : throw std::invalid_argument( "ROS2 requires a linear solver" ) ),
-          params_( p ), table_( p.method ), work_( *operations_ ), rhs_( *operations_ ), k1_( *operations_ ),
-          k2_( *operations_ ), time_derivative_( *operations_ )
+          solver_(
+              solver ? std::move( solver ) : throw std::invalid_argument( "Rosenbrock requires a linear solver" )
+          ),
+          params_( p ), table_( p.method ), work_( *operations_ ), rhs_( *operations_ ),
+          time_derivative_( *operations_ )
     {
         if ( !p.maximum_attempts )
-            throw std::invalid_argument( "ROS2 requires a nonempty attempt budget" );
+            throw std::invalid_argument( "Rosenbrock requires a nonempty attempt budget" );
         if ( !p.autonomous && !detail::has_time_derivative_evaluation<Problem, vector_type>::value )
-            throw std::invalid_argument( "Non-autonomous ROS2 requires bool evaluate_time_derivative(state, out)" );
+            throw std::invalid_argument(
+                "Non-autonomous Rosenbrock requires bool evaluate_time_derivative(state, out)"
+            );
         if constexpr ( DenseOutput )
-            throw std::invalid_argument( "ROS2 dense output is not implemented" );
+            throw std::invalid_argument( "Rosenbrock dense output is not implemented" );
         detail::balanced_affine_shift( scalar_type( 0 ), p.reference_time );
-        for ( auto *v : { &work_, &rhs_, &k1_, &k2_ } )
+        for ( auto *v : { &work_, &rhs_ } )
         {
             v->init();
             v->start_use();
+        }
+        increments_.reserve( table_.stage_count() );
+        for ( std::size_t i = 0; i < table_.stage_count(); ++i )
+        {
+            increments_.emplace_back( *operations_ );
+            increments_.back().init();
+            increments_.back().start_use();
         }
         if ( !p.autonomous )
         {
@@ -80,14 +92,14 @@ public:
     {
         require_finalized();
         if ( !std::isfinite( time ) )
-            throw std::invalid_argument( "Nonfinite ROS2 time" );
+            throw std::invalid_argument( "Nonfinite Rosenbrock time" );
         time_ = time;
     }
     void set_target_time( scalar_type target )
     {
         require_finalized();
         if ( !std::isfinite( target ) )
-            throw std::invalid_argument( "Nonfinite ROS2 target" );
+            throw std::invalid_argument( "Nonfinite Rosenbrock target" );
         target_ = target;
     }
     scalar_type get_dt() const
@@ -102,7 +114,7 @@ public:
     {
         return attempts_;
     }
-    const coefficients &table() const
+    const method_table &table() const
     {
         return table_;
     }
@@ -189,11 +201,11 @@ public:
     void finalize( adaptation_status outcome, scalar_type committed_time, const vector_type &state )
     {
         if ( !pending_ )
-            throw std::logic_error( "No ROS2 candidate to finalize" );
+            throw std::logic_error( "No Rosenbrock candidate to finalize" );
         const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
         if ( !std::isfinite( committed_time ) || ( dt_ > 0 ? committed_time < time_ || committed_time > endpoint
                                                            : committed_time > time_ || committed_time < endpoint ) )
-            throw std::invalid_argument( "Committed time is outside the pending ROS2 step" );
+            throw std::invalid_argument( "Committed time is outside the pending Rosenbrock step" );
         adaptation_->update( outcome, committed_time, committed_time - time_, state );
         pending_ = false;
     }
@@ -205,8 +217,9 @@ private:
     std::shared_ptr<TimeStepAdaptation> adaptation_;
     std::shared_ptr<LinearSolver>       solver_;
     params                              params_;
-    coefficients                        table_;
-    vector_wrap_type                    work_, rhs_, k1_, k2_, time_derivative_;
+    method_table                        table_;
+    vector_wrap_type                    work_, rhs_, time_derivative_;
+    std::vector<vector_wrap_type>       increments_;
     scalar_type                         time_ = 0, target_ = 1, dt_ = 0;
     unsigned int                        attempts_    = 0;
     bool                                initialized_ = false, pending_ = false, estimate_error_ = false;
@@ -215,19 +228,19 @@ private:
     void require_finalized() const
     {
         if ( pending_ )
-            throw std::logic_error( "Finalize the pending ROS2 step first" );
+            throw std::logic_error( "Finalize the pending Rosenbrock step first" );
     }
 
     adaptation_status assess( const vector_type &in, scalar_type &next_dt )
     {
         if constexpr ( detail::has_embedded_assessment<TimeStepAdaptation, vector_type, scalar_type>::value )
             if ( estimate_error_ )
-                return adaptation_->assess( time_, dt_, in, *work_, next_dt, table_.error_order, &*rhs_ );
+                return adaptation_->assess( time_, dt_, in, *work_, next_dt, table_.error_order(), &*rhs_ );
         return adaptation_->assess( time_, dt_, in, *work_, next_dt );
     }
 
-    // Scale A and both stage right-hand sides together. The coupling b*c21/h
-    // equals a*gamma*c21, avoiding a division by a potentially tiny timestep.
+    // Scale A and stage right-hand sides together. Couplings b*c_ij/h equal
+    // a*gamma*c_ij, avoiding division by a potentially tiny timestep.
     bool compute( const vector_type &in )
     {
         const auto alpha = scalar_type( 1 / table_.gamma ) / dt_;
@@ -244,32 +257,59 @@ private:
         problem_->set_linearization_point( in );
         auto jacobian = problem_->get_jacobi_operator();
         if ( !jacobian )
-            throw std::invalid_argument( "ROS2 requires a prepared Jacobian" );
+            throw std::invalid_argument( "Rosenbrock requires a prepared Jacobian" );
         solver_->set_operator( std::move( jacobian ) );
-        if ( !prepare_time_derivative( in ) || !rate( in, time_ ) )
+        if ( !prepare_time_derivative( in ) )
             return false;
-        operations_->scale( shift.b, *rhs_ );
-        if ( !params_.autonomous )
-            operations_->add_lin_comb( shift.b * dt_ * scalar_type( table_.gamma1 ), *time_derivative_, *rhs_ );
-        if ( !solve( *k1_ ) )
-            return false;
-        operations_->assign_lin_comb( scalar_type( 1 ), in, scalar_type( table_.a21 ), *k1_, *work_ );
-        if ( !operations_->is_valid_number( *work_ ) )
+        for ( std::size_t i = 0; i < table_.stage_count(); ++i )
         {
-            status_ = single_step_status::failed_nonfinite;
-            return false;
+            if ( !table_.reuse_previous_rate( i ) )
+            {
+                const vector_type *state = &in;
+                if ( i )
+                {
+                    operations_->assign_lin_comb(
+                        scalar_type( 1 ), in, scalar_type( table_.a( i, 0 ) ), *increments_[0], *work_
+                    );
+                    for ( std::size_t j = 1; j < i; ++j )
+                        if ( table_.a( i, j ) != 0 )
+                            operations_->add_lin_comb( scalar_type( table_.a( i, j ) ), *increments_[j], *work_ );
+                    if ( !operations_->is_valid_number( *work_ ) )
+                    {
+                        status_ = single_step_status::failed_nonfinite;
+                        return false;
+                    }
+                    state = &*work_;
+                }
+                const auto c          = table_.stage_time( i );
+                const auto stage_time = params_.autonomous || c == 0 ? time_
+                                        : c == 1 ? ( dt_ == target_ - time_ ? target_ : time_ + dt_ )
+                                                 : time_ + dt_ * scalar_type( c );
+                if ( !rate( *state, stage_time ) )
+                    return false;
+                // Once the stage state has been consumed, work_ can retain its
+                // unshifted rate for consecutive stages sharing that state/time.
+                if ( i + 1 < table_.stage_count() && table_.reuse_previous_rate( i + 1 ) )
+                    operations_->assign( *rhs_, *work_ );
+            }
+            else
+                operations_->assign( *work_, *rhs_ );
+            operations_->scale( shift.b, *rhs_ );
+            if ( !params_.autonomous )
+                operations_->add_lin_comb(
+                    shift.b * dt_ * scalar_type( table_.time_derivative( i ) ), *time_derivative_, *rhs_
+                );
+            for ( std::size_t j = 0; j < i; ++j )
+                if ( table_.c( i, j ) != 0 )
+                    operations_->add_lin_comb(
+                        shift.a * scalar_type( table_.gamma * table_.c( i, j ) ), *increments_[j], *rhs_
+                    );
+            if ( !solve( *increments_[i] ) )
+                return false;
         }
-        const auto endpoint = dt_ == target_ - time_ ? target_ : time_ + dt_;
-        if ( !rate( *work_, params_.autonomous ? time_ : endpoint ) )
-            return false;
-        operations_->scale( shift.b, *rhs_ );
-        if ( !params_.autonomous )
-            operations_->add_lin_comb( shift.b * dt_ * scalar_type( table_.gamma2 ), *time_derivative_, *rhs_ );
-        operations_->add_lin_comb( shift.a * scalar_type( table_.gamma * table_.c21 ), *k1_, *rhs_ );
-        if ( !solve( *k2_ ) )
-            return false;
-        operations_->assign_lin_comb( scalar_type( 1 ), in, scalar_type( table_.m1 ), *k1_, *work_ );
-        operations_->add_lin_comb( scalar_type( table_.m2 ), *k2_, *work_ );
+        operations_->assign_lin_comb( scalar_type( 1 ), in, scalar_type( table_.m( 0 ) ), *increments_[0], *work_ );
+        for ( std::size_t i = 1; i < table_.stage_count(); ++i )
+            operations_->add_lin_comb( scalar_type( table_.m( i ) ), *increments_[i], *work_ );
         if ( !operations_->is_valid_number( *work_ ) )
         {
             status_ = single_step_status::failed_nonfinite;
@@ -278,7 +318,11 @@ private:
         if ( estimate_error_ )
         {
             // k_i are state increments, so the error already contains h.
-            operations_->assign_lin_comb( scalar_type( table_.e1 ), *k1_, scalar_type( table_.e2 ), *k2_, *rhs_ );
+            operations_->assign_lin_comb(
+                scalar_type( table_.e( 0 ) ), *increments_[0], scalar_type( table_.e( 1 ) ), *increments_[1], *rhs_
+            );
+            for ( std::size_t i = 2; i < table_.stage_count(); ++i )
+                operations_->add_lin_comb( scalar_type( table_.e( i ) ), *increments_[i], *rhs_ );
             if ( !operations_->is_valid_number( *rhs_ ) )
             {
                 status_ = single_step_status::failed_nonfinite;
@@ -307,7 +351,7 @@ private:
         return true;
     }
 
-    // Restore base time after the non-autonomous endpoint evaluation, including
+    // Restore base time after a non-autonomous stage evaluation, including
     // failed rates and exceptions; the shifted Jacobian stays frozen throughout.
     bool rate( const vector_type &state, scalar_type stage_time )
     {

@@ -97,7 +97,7 @@ void throws( F f, const char *message )
 void test_configuration()
 {
     fixture f;
-    for ( const char *method : { "unknown", "ROS3", "" } )
+    for ( const char *method : { "unknown", "ROS4", "" } )
         throws( [&] { S s( f.ops, f.p, f.adaptation, f.solver, S::params{ method } ); }, "Unknown ROS table accepted" );
     for ( double scale :
           { 0., -1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN() } )

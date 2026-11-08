@@ -112,46 +112,58 @@ try
         blocked = true;
     }
     check( blocked, "ROS2 raw download guard is disconnected" );
-    const auto baseline = guarded_memory::allocations.size();
-    for ( unsigned int i = 1; i <= 4; ++i )
+    for ( const char *method : { "ROS2", "ROS3" } )
     {
-        ops->fail_activation = ops->activations + i;
-        bool failed          = false;
-        try
+        const rosenbrock::method_table table( method );
+        const auto                     workspace = table.stage_count() + 2;
+        const auto                     baseline  = guarded_memory::allocations.size();
+        for ( unsigned int i = 1; i <= workspace; ++i )
         {
-            S invalid( ops, p, control, linear );
+            ops->fail_activation = ops->activations + i;
+            bool failed          = false;
+            try
+            {
+                S invalid( ops, p, control, linear, S::params{ method } );
+            }
+            catch ( const std::runtime_error & )
+            {
+                failed = true;
+            }
+            check(
+                failed && guarded_memory::allocations.size() == baseline, "Partial ROS2 construction leaked workspace"
+            );
         }
-        catch ( const std::runtime_error & )
+        ops->fail_activation = 0;
         {
-            failed = true;
-        }
-        check( failed && guarded_memory::allocations.size() == baseline, "Partial ROS2 construction leaked workspace" );
-    }
-    ops->fail_activation = 0;
-    {
-        S step( ops, p, control, linear );
-        check( guarded_memory::allocations.size() == baseline + 4, "ROS2 retained more than four workspace vectors" );
-        step.apply( *state, *out );
-        check( step.get_status() == single_step_status::converged, "Matrix-free ROS2 warmup failed" );
-        step.finalize( adaptation_status::accepted, .02, *out );
-        const auto allocations = guarded_memory::allocation_count;
-        for ( unsigned int i = 0; i < 3; ++i )
-        {
-            step.reset();
-            step.set_time( 0 );
-            step.set_target_time( .02 );
+            ops->assign_scalar( 1., *state );
+            S step( ops, p, control, linear, S::params{ method } );
+            check(
+                guarded_memory::allocations.size() == baseline + workspace,
+                "Rosenbrock retained unnecessary workspace vectors"
+            );
             step.apply( *state, *out );
-            check( step.get_status() == single_step_status::converged, "Repeated matrix-free ROS2 solve failed" );
+            check( step.get_status() == single_step_status::converged, "Matrix-free ROS2 warmup failed" );
             step.finalize( adaptation_status::accepted, .02, *out );
+            const auto allocations = guarded_memory::allocation_count;
+            for ( unsigned int i = 0; i < 3; ++i )
+            {
+                step.reset();
+                step.set_time( 0 );
+                step.set_target_time( .02 );
+                step.apply( *state, *out );
+                check( step.get_status() == single_step_status::converged, "Repeated matrix-free ROS2 solve failed" );
+                step.finalize( adaptation_status::accepted, .02, *out );
+            }
+            check( allocations == guarded_memory::allocation_count, "ROS2 allocated backend vectors after warmup" );
+            const double g = table.gamma, z = -.02;
+            const double exact = table.order() == 2 ? ( 1 + ( 1 - 2 * g ) * z ) / std::pow( 1 - g * z, 2 )
+                                                    : ( 1 + ( 1 - 3 * g ) * z + ( .5 - 3 * g + 3 * g * g ) * z * z ) /
+                                                          std::pow( 1 - g * z, 3 );
+            ops->add_mul_scalar( -exact, 1., *out );
+            check( ops->norm( *out ) < 1e-10, "Matrix-free ROS2 output disagrees with its stability function" );
         }
-        check( allocations == guarded_memory::allocation_count, "ROS2 allocated backend vectors after warmup" );
-        const rosenbrock::coefficients c;
-        const double                   z     = -.02;
-        const double                   exact = ( 1 + ( 1 - 2 * c.gamma ) * z ) / std::pow( 1 - c.gamma * z, 2 );
-        ops->add_mul_scalar( -exact, 1., *out );
-        check( ops->norm( *out ) < 1e-10, "Matrix-free ROS2 output disagrees with its stability function" );
     }
-    auto adaptive_mode = [&]( auto selected_problem, bool nonautonomous ) {
+    auto adaptive_mode = [&]( auto selected_problem, bool nonautonomous, const char *method ) {
         using Problem = typename decltype( selected_problem )::element_type;
         using Linear  = krylov_solver<Problem, space>;
         using Control = integration::time_step_adaptation_scipy<space>;
@@ -163,9 +175,11 @@ try
         auto                  control     = std::make_shared<Control>( ops, cp );
         auto                  solver      = make_krylov<Linear>( ops );
         typename Step::params sp;
-        sp.autonomous     = !nonautonomous;
-        const auto before = guarded_memory::allocations.size();
-        for ( unsigned int i = 1; i <= ( nonautonomous ? 5u : 4u ); ++i )
+        sp.method            = method;
+        sp.autonomous        = !nonautonomous;
+        const auto workspace = rosenbrock::method_table( method ).stage_count() + 2 + ( nonautonomous ? 1 : 0 );
+        const auto before    = guarded_memory::allocations.size();
+        for ( unsigned int i = 1; i <= workspace; ++i )
         {
             ops->fail_activation = ops->activations + i;
             bool failed          = false;
@@ -185,7 +199,7 @@ try
         ops->fail_activation = 0;
         Step step( ops, selected_problem, control, solver, sp );
         check(
-            guarded_memory::allocations.size() == before + ( nonautonomous ? 5 : 4 ),
+            guarded_memory::allocations.size() == before + workspace,
             "Adaptive ROS2 allocated an unnecessary error or time-derivative vector"
         );
         ops->assign_scalar( std::exp( .74 ), *state );
@@ -206,11 +220,14 @@ try
         }
         check( guarded_memory::allocation_count == allocated, "Adaptive ROS2 allocated backend memory after warmup" );
     };
-    adaptive_mode( p, false );
     auto time = std::make_shared<time_problem<space>>( ops );
-    adaptive_mode( time, true );
+    for ( const char *method : { "ROS2", "ROS3" } )
+    {
+        adaptive_mode( p, false, method );
+        adaptive_mode( time, true, method );
+    }
     check( time->derivatives > 0 && time->time == .37, "Guarded ROS2 omitted f_t or changed base time" );
-    std::cout << "Fixed/adaptive/non-autonomous ROS2, fixed workspace and blocked vector-sized host transfers: "
+    std::cout << "Fixed/adaptive/non-autonomous ROS2/ROS3, fixed workspace and blocked vector-sized host transfers: "
               << checks << " checks PASS\n";
 }
 catch ( const std::exception &e )
