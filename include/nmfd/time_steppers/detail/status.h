@@ -20,7 +20,8 @@ enum class single_step_status
     failed_solver,
     error_estimate_unavailable,
     attempt_limit_reached,
-    step_size_underflow
+    step_size_underflow,
+    failed_projection
 };
 enum class integration_status
 {

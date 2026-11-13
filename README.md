@@ -95,6 +95,54 @@ Coefficient sources: [SSP embedded pairs](https://imrefekete.web.elte.hu/files/2
 [Dormand-Prince method](https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.RK45.html).
 Rooted-tree tests check nonlinear order, not just a scalar stability polynomial.
 
+### Optional Explicit Stage-Rate Projection
+
+Append a projector type after the existing `DenseOutput` argument and pass its
+shared instance after the constructor's `params`:
+
+```cpp
+using step_type = runge_kutta::explicit_time_step<Space, Problem, Controller,
+                                                true, ProjectionOperator>;
+auto step = std::make_shared<step_type>(space, problem, controller,
+                                       step_type::params{"RK45"}, projector);
+```
+
+A nondefault projector must provide `bool apply(vector_type& rate)` and cannot
+be null. Every newly evaluated physical rate is checked, projected in place and
+checked again before storage: `k_i=P*f(t_i,Y_i)`. This includes additional dense
+stages and fallback endpoint rates. False returns report `failed_projection`
+and follow the existing bounded numerical rejection policy. Nonfinite results
+report `failed_nonfinite`; exceptions propagate without publication. The input,
+output and committed state remain unchanged on failure, including aliased calls.
+Projectors own their solver/scratch and must not commit physical pressure or
+history during trial calls. Check projection convergence inside the projector;
+a finite vector alone does not establish success.
+
+The default `nmfd::operations::ident_operator<Space>` is compiled out, accepts
+the default null pointer and adds no application, validity scan or backend vector.
+Its existing void-returning interface is unchanged. Other void-returning
+projectors are not accepted. The stepper retains shared ownership and performs
+no per-stage shared-pointer copies or vector allocations.
+
+The validated contract is a fixed linear homogeneous projector on rates, with
+consistent initial data. Embedded defects (including DOP853's two components)
+and dense output use the projected stages. Dense sampling invokes no projector.
+With initial state in the projector's range, these linear combinations preserve
+that subspace up to solver/rounding errors. FSAL reuses an already projected rate;
+call `invalidate_rhs_cache()` after changing the projector or its dependencies,
+just as after an independent RHS change. Reset/rejection/modified-commit rules
+remain unchanged. This is not nonlinear state normalization, a moving-constraint
+solver, or a complete pressure-correction scheme with wall boundary conditions.
+DIRK/IMEX pressure splitting, BDF/Rosenbrock projections and automatic prepared
+shooting derivatives of the projection are not added. A prepared replay provider
+must independently supply the same projected rate and its derivative.
+
+`test_explicit_projection`, `test_explicit_projection_lifecycle` and
+`test_explicit_projection_backend` cover all named explicit tables, analytical
+order, adaptive/dense comparisons, signed/nonzero-time trajectories, retries,
+exceptions, FSAL, ownership and a 24576-unknown transfer/allocation guard. The
+parent adds GCC/Clang serial/OpenMP, sanitizer and capability-gated CUDA/HIP jobs.
+
 These IMEX tables are executed by `runge_kutta/imex_time_step.h`.
 Adaptive initialization uses the configured initial step and bounded rejection,
 not an extra initial derivative evaluation.

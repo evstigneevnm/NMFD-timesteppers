@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
+#include <nmfd/operations/ident_operator.h>
 #include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
 #include <nmfd/time_steppers/runge_kutta/butcher_tables.h>
@@ -50,12 +51,16 @@ struct has_dual_error_assessment<
 };
 }
 
-template <class VectorOperations, class Problem, class TimeStepAdaptation, bool DenseOutput = false>
+template <
+    class VectorOperations, class Problem, class TimeStepAdaptation, bool DenseOutput = false,
+    class ProjectionOperator = nmfd::operations::ident_operator<VectorOperations>>
 class explicit_time_step
 {
 public:
     using scalar_type = typename VectorOperations::scalar_type;
     using vector_type = typename VectorOperations::vector_type;
+    static constexpr bool projects_stage_rates =
+        !std::is_same_v<ProjectionOperator, nmfd::operations::ident_operator<VectorOperations>>;
 
     struct params
     {
@@ -70,7 +75,8 @@ public:
 
     explicit_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
-        std::shared_ptr<TimeStepAdaptation> adaptation, const params &p = {}
+        std::shared_ptr<TimeStepAdaptation> adaptation, const params &p = {},
+        std::shared_ptr<ProjectionOperator> projection_operator = nullptr
     )
         : operations_(
               operations ? std::move( operations ) : throw std::invalid_argument( "RK requires vector operations" )
@@ -79,12 +85,22 @@ public:
           adaptation_(
               adaptation ? std::move( adaptation ) : throw std::invalid_argument( "RK requires time adaptation" )
           ),
-          params_( p ), table_( make_butcher_table( p.method ) ), combined_error_( use_combined_error() ),
-          work_( *operations_ ),
+          projection_operator_( std::move( projection_operator ) ), params_( p ),
+          table_( make_butcher_table( p.method ) ), combined_error_( use_combined_error() ), work_( *operations_ ),
           error_( *operations_, table_.is_embedded() || ( combined_error_ && supports_combined_error ) ),
           secondary_error_( *operations_, combined_error_ && supports_combined_error ),
           dense_( *operations_, !table_.has_dense_output() )
     {
+        if constexpr ( projects_stage_rates )
+        {
+            static_assert(
+                std::is_same_v<
+                    decltype( std::declval<ProjectionOperator &>().apply( std::declval<vector_type &>() ) ), bool>,
+                "RK stage projection requires bool apply(vector_type&)"
+            );
+            if ( !projection_operator_ )
+                throw std::invalid_argument( "RK requires the selected stage projector" );
+        }
         if ( table_.type() != butcher_table::scheme_type::explicit_rk )
         {
             throw std::invalid_argument( "Explicit RK cannot execute an implicit table" );
@@ -337,6 +353,7 @@ private:
     std::shared_ptr<VectorOperations>                    operations_;
     std::shared_ptr<Problem>                             problem_;
     std::shared_ptr<TimeStepAdaptation>                  adaptation_;
+    std::shared_ptr<ProjectionOperator>                  projection_operator_;
     params                                               params_;
     butcher_table                                        table_;
     bool                                                 combined_error_;
@@ -556,6 +573,21 @@ private:
         {
             status_ = single_step_status::failed_nonfinite;
             return false;
+        }
+        // Store the projected RHS for every consumer, including dense-only
+        // stages, embedded defects and FSAL. The identity path adds no work.
+        if constexpr ( projects_stage_rates )
+        {
+            if ( !projection_operator_->apply( rate ) )
+            {
+                status_ = single_step_status::failed_projection;
+                return false;
+            }
+            if ( !operations_->is_valid_number( rate ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
         }
         return true;
     }
