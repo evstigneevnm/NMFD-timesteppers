@@ -133,7 +133,7 @@ call `invalidate_rhs_cache()` after changing the projector or its dependencies,
 just as after an independent RHS change. Reset/rejection/modified-commit rules
 remain unchanged. This is not nonlinear state normalization, a moving-constraint
 solver, or a complete pressure-correction scheme with wall boundary conditions.
-DIRK/IMEX pressure splitting, BDF/Rosenbrock projections and automatic prepared
+IMEX pressure splitting, BDF/Rosenbrock projections and automatic prepared
 shooting derivatives of the projection are not added. A prepared replay provider
 must independently supply the same projected rate and its derivative.
 
@@ -148,6 +148,47 @@ Adaptive initialization uses the configured initial step and bounded rejection,
 not an extra initial derivative evaluation.
 
 ## Implicit RK
+
+### Optional Stage Projection
+
+Append `ProjectionOperator` after the existing `DenseOutput` template argument,
+and its shared instance after constructor `params` (named and custom tables):
+
+```cpp
+using step_type = runge_kutta::implicit_time_step<Space, Problem, Controller,
+                                                NonlinearSolver, true, Projector>;
+step_type step(space, problem, controller, solver,
+               step_type::params{"ESDIRK2(1)3"}, projector);
+```
+
+The nondefault contract is `bool apply(vector_type&)`, with a nonnull instance.
+Project each solved implicit stage **state** before recovering its consumed rate
+`k_i=(Y_i-w_i)/(h*a_ii)`, including stiffly-accurate endpoints with omitted rates.
+Project zero-diagonal and additional dense-stage **rates** after physical rate
+evaluation. Embedded defects and dense polynomials use these corrected rates;
+sampling performs no projection or solve. Default identity projection is compiled
+out, accepts null, and adds no backend vectors, application or validity scans.
+False/nonfinite/exception handling and ownership follow explicit stage projection.
+Projectors may change trial scratch only, not committed pressure/history or the
+prepared problem linearization. Rebinding requires finalization/reset as usual.
+
+This opt-in path is validated for identity mass, consistent initial states and
+a fixed linear homogeneous projector satisfying `P*f(t,v)=P*f(t,P*v)`.
+For `P*w_i=w_i`, projecting the provisional stage then solves the projected RK
+equation. Commuting linear diffusion and periodic Leray projection satisfy this.
+Arbitrary nonlinear implicit operators, moving/affine constraints, singular mass
+and wall-boundary pressure splitting do **not** follow from this result. Formulate
+a consistent projected residual/Jacobian in the problem for those cases.
+Do not automatically reuse unprojected prepared shooting derivatives.
+
+`test_implicit_projection`, `test_implicit_projection_lifecycle` and
+`test_implicit_projection_backend` cover primary orders, independent reduced ODEs,
+adaptation, signed/nonzero stage times, dense output, failures/retries, ownership,
+a noncommuting counterexample and 24576-unknown transfer/allocation guards.
+The parent project separately validates manufactured periodic Stokes using its
+Fourier discretization; no project PDE dependency enters this library.
+
+### Stage Problem
 
 `runge_kutta/implicit_time_step.h` executes lower-triangular implicit RK tables,
 including IE, IM, CN, SDIRK2(1)2, ESDIRK2(1)3, SDIRK3(1)3, ARK324L2SA and

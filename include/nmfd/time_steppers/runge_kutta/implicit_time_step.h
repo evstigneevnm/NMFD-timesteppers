@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
+#include <nmfd/operations/ident_operator.h>
 #include <nmfd/time_steppers/detail/affine_shift.h>
 #include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
@@ -51,12 +52,15 @@ using nmfd::time_steppers::detail::has_implicit_stage_interface;
 }
 
 template <
-    class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false>
+    class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false,
+    class ProjectionOperator = nmfd::operations::ident_operator<VectorOperations>>
 class implicit_time_step
 {
 public:
     using scalar_type = typename VectorOperations::scalar_type;
     using vector_type = typename VectorOperations::vector_type;
+    static constexpr bool projects_stages =
+        !std::is_same_v<ProjectionOperator, nmfd::operations::ident_operator<VectorOperations>>;
 
     struct params
     {
@@ -73,11 +77,12 @@ public:
     // Select the named Butcher table from p.method and delegate construction.
     implicit_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
-        std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, const params &p = {}
+        std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, const params &p = {},
+        std::shared_ptr<ProjectionOperator> projection_operator = nullptr
     )
         : implicit_time_step(
               std::move( operations ), std::move( problem ), std::move( adaptation ), std::move( solver ),
-              make_butcher_table( p.method ), p
+              make_butcher_table( p.method ), p, std::move( projection_operator )
           )
     {
     }
@@ -87,7 +92,7 @@ public:
     implicit_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
         std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, butcher_table table,
-        const params &p = {}
+        const params &p = {}, std::shared_ptr<ProjectionOperator> projection_operator = nullptr
     )
         : operations_(
               operations ? std::move( operations ) : throw std::invalid_argument( "DIRK requires vector operations" )
@@ -97,9 +102,19 @@ public:
               adaptation ? std::move( adaptation ) : throw std::invalid_argument( "DIRK requires time adaptation" )
           ),
           solver_( solver ? std::move( solver ) : throw std::invalid_argument( "DIRK requires a nonlinear solver" ) ),
-          params_( p ), table_( std::move( table ) ), work_( *operations_ ), error_( *operations_ ),
-          dense_( *operations_ )
+          projection_operator_( std::move( projection_operator ) ), params_( p ), table_( std::move( table ) ),
+          work_( *operations_ ), error_( *operations_ ), dense_( *operations_ )
     {
+        if constexpr ( projects_stages )
+        {
+            static_assert(
+                std::is_same_v<
+                    decltype( std::declval<ProjectionOperator &>().apply( std::declval<vector_type &>() ) ), bool>,
+                "DIRK stage projection requires bool apply(vector_type&)"
+            );
+            if ( !projection_operator_ )
+                throw std::invalid_argument( "DIRK requires the selected stage projector" );
+        }
         if ( p.maximum_attempts == 0 )
             throw std::invalid_argument( "Empty DIRK attempt budget" );
         nmfd::time_steppers::detail::balanced_affine_shift( scalar_type( 0 ), p.reference_time );
@@ -315,6 +330,7 @@ private:
     std::shared_ptr<Problem>                                      problem_;
     std::shared_ptr<TimeStepAdaptation>                           adaptation_;
     std::shared_ptr<NonlinearSolver>                              solver_;
+    std::shared_ptr<ProjectionOperator>                           projection_operator_;
     params                                                        params_;
     butcher_table                                                 table_;
     vector_wrap_type                                              work_, error_;
@@ -332,6 +348,43 @@ private:
     scalar_type endpoint_time() const
     {
         return dt_ == target_ - time_ ? target_ : time_ + dt_;
+    }
+
+    // Post-solve projection is consistent only for compatible fixed linear
+    // projectors: P*f(t,v)=P*f(t,P*v), identity mass and P*previous=previous.
+    bool project( vector_type &value )
+    {
+        if constexpr ( projects_stages )
+        {
+            if ( !projection_operator_->apply( value ) )
+            {
+                status_ = single_step_status::failed_projection;
+                return false;
+            }
+            if ( !operations_->is_valid_number( value ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Zero-diagonal and dense-only stages consume the projected physical rate.
+    bool evaluate_projected_rate( const vector_type &state, vector_type &rate )
+    {
+        if constexpr ( detail::has_rate_evaluation<Problem, vector_type>::value )
+            if ( !problem_->evaluate_rate( state, rate ) )
+            {
+                status_ = single_step_status::failed_solver;
+                return false;
+            }
+        if ( !operations_->is_valid_number( rate ) )
+        {
+            status_ = single_step_status::failed_nonfinite;
+            return false;
+        }
+        return project( rate );
     }
 
     // Retain only derivatives consumed by stages, endpoints, estimators or dense output.
@@ -409,17 +462,9 @@ private:
                 }
                 time_changed = true;
                 problem_->set_time( stage_time );
-                if constexpr ( detail::has_rate_evaluation<Problem, vector_type>::value )
-                    if ( !problem_->evaluate_rate( state, *rates_[i] ) )
-                    {
-                        status_ = single_step_status::failed_solver;
-                        ok      = false;
-                        break;
-                    }
-                if ( !operations_->is_valid_number( *rates_[i] ) )
+                if ( !evaluate_projected_rate( state, *rates_[i] ) )
                 {
-                    status_ = single_step_status::failed_nonfinite;
-                    ok      = false;
+                    ok = false;
                     break;
                 }
             }
@@ -485,12 +530,8 @@ private:
             if ( table_.a( i, i ) == 0 )
             {
                 // Construction requires evaluate_rate() only for rates that are used.
-                if constexpr ( detail::has_rate_evaluation<Problem, vector_type>::value )
-                    if ( store_rate && !problem_->evaluate_rate( *work_, *rates_[i] ) )
-                    {
-                        status_ = single_step_status::failed_solver;
-                        return false;
-                    }
+                if ( store_rate && !evaluate_projected_rate( *work_, *rates_[i] ) )
+                    return false;
             }
             else
             {
@@ -512,13 +553,15 @@ private:
                     status_ = single_step_status::failed_nonfinite;
                     return false;
                 }
+                if ( !project( *work_ ) )
+                    return false;
                 if ( store_rate )
                 {
                     operations_->assign_lin_comb( scalar_type( 1 ), *work_, scalar_type( -1 ), previous, *rates_[i] );
                     operations_->scale( alpha, *rates_[i] );
                 }
             }
-            if ( store_rate && !operations_->is_valid_number( *rates_[i] ) )
+            if ( store_rate && table_.a( i, i ) != 0 && !operations_->is_valid_number( *rates_[i] ) )
             {
                 status_ = single_step_status::failed_nonfinite;
                 return false;
