@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <utility>
 #include <nmfd/detail/vector_wrap.h>
+#include <nmfd/operations/ident_operator.h>
 #include <nmfd/time_steppers/bdf/coefficients.h>
 #include <nmfd/time_steppers/bdf/history.h>
 #include <nmfd/time_steppers/bdf/order_policy.h>
@@ -21,12 +22,15 @@
 namespace nmfd::time_steppers::bdf
 {
 template <
-    class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false>
+    class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false,
+    class ProjectionOperator = nmfd::operations::ident_operator<VectorOperations>>
 class implicit_time_step
 {
 public:
     using scalar_type = typename VectorOperations::scalar_type;
     using vector_type = typename VectorOperations::vector_type;
+    static constexpr bool projects_states =
+        !std::is_same_v<ProjectionOperator, nmfd::operations::ident_operator<VectorOperations>>;
 
     struct params
     {
@@ -47,7 +51,8 @@ public:
     // Allocate backend workspace once and bind the supplied nonlinear solver.
     implicit_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
-        std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, const params &p = {}
+        std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, const params &p = {},
+        std::shared_ptr<ProjectionOperator> projection_operator = nullptr
     )
         : operations_(
               operations ? std::move( operations ) : throw std::invalid_argument( "BDF requires vector operations" )
@@ -57,9 +62,19 @@ public:
               adaptation ? std::move( adaptation ) : throw std::invalid_argument( "BDF requires time adaptation" )
           ),
           solver_( solver ? std::move( solver ) : throw std::invalid_argument( "BDF requires a nonlinear solver" ) ),
-          params_( p ), work_( *operations_ ), base_( *operations_ ), older_( *operations_ ), error_( *operations_ ),
-          history_( *operations_ )
+          projection_operator_( std::move( projection_operator ) ), params_( p ), work_( *operations_ ),
+          base_( *operations_ ), older_( *operations_ ), error_( *operations_ ), history_( *operations_ )
     {
+        if constexpr ( projects_states )
+        {
+            static_assert(
+                std::is_same_v<
+                    decltype( std::declval<ProjectionOperator &>().apply( std::declval<vector_type &>() ) ), bool>,
+                "BDF state projection requires bool apply(vector_type&)"
+            );
+            if ( !projection_operator_ )
+                throw std::invalid_argument( "BDF requires the selected state projector" );
+        }
         automatic_order_ = p.method == "BDF";
         if ( p.method != "BDF1" && p.method != "BDF2" && !automatic_order_ )
             throw std::invalid_argument( "BDF requires BDF1, BDF2 or adaptive BDF" );
@@ -318,6 +333,7 @@ private:
     std::shared_ptr<Problem>                     problem_;
     std::shared_ptr<TimeStepAdaptation>          adaptation_;
     std::shared_ptr<NonlinearSolver>             solver_;
+    std::shared_ptr<ProjectionOperator>          projection_operator_;
     params                                       params_;
     vector_wrap_type                             work_, base_, older_, error_;
     divided_difference_history<VectorOperations> history_;
@@ -397,6 +413,22 @@ private:
         {
             status_ = single_step_status::failed_nonfinite;
             return false;
+        }
+        // Includes both startup half-steps. Project before the state is used by
+        // another solve, error estimation or committed history. Identity mass
+        // and fixed linear P require P*f(t,v)=P*f(t,P*v), as for DIRK.
+        if constexpr ( projects_states )
+        {
+            if ( !projection_operator_->apply( state ) )
+            {
+                status_ = single_step_status::failed_projection;
+                return false;
+            }
+            if ( !operations_->is_valid_number( state ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
         }
         return true;
     }

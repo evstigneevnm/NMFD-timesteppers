@@ -133,7 +133,7 @@ call `invalidate_rhs_cache()` after changing the projector or its dependencies,
 just as after an independent RHS change. Reset/rejection/modified-commit rules
 remain unchanged. This is not nonlinear state normalization, a moving-constraint
 solver, or a complete pressure-correction scheme with wall boundary conditions.
-BDF/Rosenbrock projections and automatic prepared
+Rosenbrock projections and automatic prepared
 shooting derivatives of the projection are not added. A prepared replay provider
 must independently supply the same projected rate and its derivative.
 
@@ -412,6 +412,32 @@ modify divided differences. Modified endpoints, independent model/state changes
 and discontinuous time changes follow the same restart rules as fixed mode.
 No mass inversion or `evaluate_rate()` is introduced. DAE error estimation remains
 formulation-dependent; accepted algebraic constraints retain their own tests.
+
+### Optional State Projection
+
+Append `ProjectionOperator` after `DenseOutput` and pass its shared instance
+after `params`, as for DIRK. Nondefault projectors require a nonnull instance
+and `bool apply(vector_type& state)`. Project each solved state before estimating
+errors, including both startup half-steps. False/nonfinite/exception handling
+matches DIRK; no failed trial publishes a state or advances history.
+
+The validated scope is identity mass, a fixed linear homogeneous projector P,
+consistent initial/history states and `P*f(t,v)=P*f(t,P*v)`. Commuting periodic
+diffusion/constant transport satisfy this condition. Do not infer nonlinear
+pressure splitting, wall-boundary corrections or general constrained DAE support.
+Ordinary projected commits remain `accepted`, not `accepted_modified`, so BDF
+order can grow normally. External changes/shortened endpoints still restart at
+BDF1. Reset after changing the projector and supply consistent restart states.
+Dense interpolation uses corrected history; sampling performs no projection.
+
+The identity default is compiled out and needs no instance, extra scan or vector.
+Projection adds one backend application/validity check per successful solved
+state (three during error-estimating startup), no additional BDF vector or copy.
+`test_implicit_bdf_projection`, `_lifecycle` and `_backend` cover accuracy,
+orders 1-5, startup faults, retries, rollback, shortened commits, ownership,
+default storage equivalence and large backend transfer/allocation guards.
+The parent separately validates manufactured periodic Stokes/Oseen and figures.
+Prepared shooting derivatives of projected BDF remain a separate capability.
 
 ### Automatic Order 1-5
 
