@@ -2,22 +2,25 @@
 
 using namespace projection_tests;
 
-#ifdef TEST_PROJECTION_VOID_MUST_FAIL
-struct void_projector
+#if defined( TEST_PROJECTION_BAD_RETURN_MUST_FAIL ) || defined( TEST_PROJECTION_MISSING_APPLY_MUST_FAIL )
+struct invalid_projector
 {
-    void apply( space_type::vector_type & )
+#    ifdef TEST_PROJECTION_BAD_RETURN_MUST_FAIL
+    int apply( space_type::vector_type & )
     {
+        return 1;
     }
+#    endif
 };
-void reject_void_projector(
+void reject_invalid_projector(
     std::shared_ptr<space_type> ops, std::shared_ptr<implicit_problem<space_type>> p,
     std::shared_ptr<fixed_control<space_type>> control
 )
 {
     using S = runge_kutta::implicit_time_step<
         space_type, implicit_problem<space_type>, fixed_control<space_type>, implicit_newton<space_type>::solver, false,
-        void_projector>;
-    S step( ops, p, control, implicit_newton<space_type>::make( ops ), {}, std::make_shared<void_projector>() );
+        invalid_projector>;
+    S step( ops, p, control, implicit_newton<space_type>::make( ops ), {}, std::make_shared<invalid_projector>() );
 }
 #endif
 

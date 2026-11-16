@@ -162,6 +162,32 @@ struct projector
     }
 };
 
+// Direct mapping with no retryable failure flag. Invalid output and exceptions
+// are injected independently to test the timestepper's publication boundary.
+template <class Space>
+struct void_projector
+{
+    using X = typename Space::vector_type;
+    std::shared_ptr<Space> operations;
+    std::size_t            calls = 0, invalid_on = 0, throw_on = 0;
+    explicit void_projector( std::shared_ptr<Space> ops ) : operations( std::move( ops ) )
+    {
+    }
+    void apply( X &value )
+    {
+        ++calls;
+        if ( calls == throw_on )
+        {
+            operations->assign_scalar( -99., value );
+            throw std::runtime_error( "Injected void projection exception" );
+        }
+        if ( calls == invalid_on )
+            operations->assign_scalar( std::numeric_limits<double>::quiet_NaN(), value );
+        else
+            map_blocks( *operations, typename projector<Space>::mapping{ value } );
+    }
+};
+
 template <class Space, class Control = fixed_control<Space>, bool Dense = false>
 using projected_step = runge_kutta::explicit_time_step<Space, problem<Space>, Control, Dense, projector<Space>>;
 template <class Space, class Control = fixed_control<Space>, bool Dense = false>

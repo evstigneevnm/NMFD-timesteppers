@@ -107,8 +107,8 @@ auto step = std::make_shared<step_type>(space, problem, controller,
                                        step_type::params{"RK45"}, projector);
 ```
 
-A nondefault projector must provide `bool apply(vector_type& rate)` and cannot
-be null. Every newly evaluated physical rate is checked, projected in place and
+A nondefault projector must provide an in-place `apply(vector_type& rate)` returning
+`void` or `bool` and cannot be null. Every newly evaluated physical rate is checked, projected in place and
 checked again before storage: `k_i=P*f(t_i,Y_i)`. This includes additional dense
 stages and fallback endpoint rates. False returns report `failed_projection`
 and follow the existing bounded numerical rejection policy. Nonfinite results
@@ -120,9 +120,20 @@ a finite vector alone does not establish success.
 
 The default `nmfd::operations::ident_operator<Space>` is compiled out, accepts
 the default null pointer and adds no application, validity scan or backend vector.
-Its existing void-returning interface is unchanged. Other void-returning
-projectors are not accepted. The stepper retains shared ownership and performs
-no per-stage shared-pointer copies or vector allocations.
+Its existing void-returning interface is unchanged. The stepper retains shared
+ownership and performs no per-stage shared-pointer copies or vector allocations.
+
+All five engines share `detail/apply_operator.h`: `apply_operator(op,value)`
+selects the exact `void`/`bool` return type at compile time and invokes the
+in-place operator once. A Boolean false follows numerical rejection; a void
+operator reports no retryable failure flag. Both retain post-application finite
+checks and propagate exceptions without publishing a candidate. Constructors
+validate the callable/result before allocating workspace; integer, proxy and
+reference results are not accepted. Void does not certify exactness or constraint
+accuracy. The helper adds no vector storage, transfers or runtime type dispatch.
+`test_explicit_apply_operator.cpp` checks detection and exactly-once dispatch;
+`test_implicit_operator_projection.cpp` compares both return types across all
+engines, including dense output, retries, rollback and backend-transfer guards.
 
 The validated contract is a fixed linear homogeneous projector on rates, with
 consistent initial data. Embedded defects (including DOP853's two components)
@@ -160,7 +171,8 @@ step_type step(space, problem, controller, solver,
                step_type::params{"ESDIRK2(1)3"}, projector);
 ```
 
-The nondefault contract is `bool apply(vector_type&)`, with a nonnull instance.
+The nondefault contract is `void apply(vector_type&)` or `bool apply(vector_type&)`,
+with a nonnull instance.
 Project each solved implicit stage **state** before recovering its consumed rate
 `k_i=(Y_i-w_i)/(h*a_ii)`, including stiffly-accurate endpoints with omitted rates.
 Project zero-diagonal and additional dense-stage **rates** after physical rate
@@ -416,8 +428,8 @@ formulation-dependent; accepted algebraic constraints retain their own tests.
 
 Append `ProjectionOperator` after `DenseOutput` and pass its shared instance
 after `params`, as for DIRK. Nondefault projectors require a nonnull instance
-and `bool apply(vector_type& state)`. Project each solved state before estimating
-errors, including both startup half-steps. False/nonfinite/exception handling
+and `apply(vector_type& state)` returning `void` or `bool`. Project each solved
+state before estimating errors, including both startup half-steps. False/nonfinite/exception handling
 matches DIRK; no failed trial publishes a state or advances history.
 
 The validated scope is identity mass, a fixed linear homogeneous projector P,
@@ -535,8 +547,9 @@ bash tests/run_all.sh --systems lorenz coupled_mass --methods BDF1 BDF2 BDF \
 `imex_time_step` appends `ProjectionOperator` after the existing `DenseOutput`
 template argument. Both constructors accept its shared instance after `params`;
 existing calls and partition/controller interfaces are unchanged. As in DIRK,
-nondefault projectors require a nonnull instance with `bool apply(vector_type&)`; the canonical
-identity is compiled out and adds no projection, validity scans or backend vectors.
+nondefault projectors require a nonnull instance with `apply(vector_type&)`
+returning `void` or `bool`; the canonical identity is compiled out and adds no
+projection, validity scans or backend vectors.
 
 Each stage reference contains both previously corrected partition sums. Project
 a solved implicit stage state before recovering `kI=(Y-w)/(h*aI_ii)` and before
@@ -778,8 +791,8 @@ problem, not the native constant-mass residual formula.
 
 Append `ProjectionOperator` after `DenseOutput` and its shared instance after
 constructor `params`, as for RK/BDF. Nondefault projectors require a nonnull
-instance and `bool apply(vector_type& increment)`. Project every successful
-ordinary or dense-only linear solve before consuming its increment. Endpoints,
+instance and `apply(vector_type& increment)` returning `void` or `bool`. Project
+every successful ordinary or dense-only linear solve before consuming its increment. Endpoints,
 embedded defects and dense interpolation then use the projected increments;
 sampling performs no projection. False/nonfinite results follow bounded
 rejection, exceptions propagate, and failed work never publishes a candidate/view.

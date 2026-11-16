@@ -2,20 +2,23 @@
 using namespace projection_tests;
 using O = space_type;
 
-#ifdef TEST_PROJECTION_VOID_MUST_FAIL
-struct void_projector
+#if defined( TEST_PROJECTION_BAD_RETURN_MUST_FAIL ) || defined( TEST_PROJECTION_MISSING_APPLY_MUST_FAIL )
+struct invalid_projector
 {
-    void apply( O::vector_type & )
+#    ifdef TEST_PROJECTION_BAD_RETURN_MUST_FAIL
+    int apply( O::vector_type & )
     {
+        return 1;
     }
+#    endif
 };
-void reject_void_projector( std::shared_ptr<O> ops, std::shared_ptr<implicit_problem<O>> p )
+void reject_invalid_projector( std::shared_ptr<O> ops, std::shared_ptr<implicit_problem<O>> p )
 {
     using S = bdf::implicit_time_step<
-        O, implicit_problem<O>, fixed_control<O>, implicit_newton<O>::solver, false, void_projector>;
+        O, implicit_problem<O>, fixed_control<O>, implicit_newton<O>::solver, false, invalid_projector>;
     S invalid(
         ops, p, std::make_shared<fixed_control<O>>(), implicit_newton<O>::make( ops ), {},
-        std::make_shared<void_projector>()
+        std::make_shared<invalid_projector>()
     );
 }
 #endif

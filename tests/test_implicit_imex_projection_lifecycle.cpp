@@ -5,17 +5,21 @@ using O = space_type;
 using P = imex_projection_problem<O>;
 using I = P::implicit_type;
 
-#ifdef TEST_PROJECTION_VOID_MUST_FAIL
-struct void_projector
+#if defined( TEST_PROJECTION_BAD_RETURN_MUST_FAIL ) || defined( TEST_PROJECTION_MISSING_APPLY_MUST_FAIL )
+struct invalid_projector
 {
-    void apply( O::vector_type & )
+#    ifdef TEST_PROJECTION_BAD_RETURN_MUST_FAIL
+    int apply( O::vector_type & )
     {
+        return 1;
     }
+#    endif
 };
-void reject_void_projector( std::shared_ptr<O> ops, std::shared_ptr<P> p, std::shared_ptr<fixed_control<O>> control )
+void reject_invalid_projector( std::shared_ptr<O> ops, std::shared_ptr<P> p, std::shared_ptr<fixed_control<O>> control )
 {
-    using S = runge_kutta::imex_time_step<O, P, fixed_control<O>, implicit_newton<O, I>::solver, false, void_projector>;
-    S invalid( ops, p, control, implicit_newton<O, I>::make( ops ), {}, std::make_shared<void_projector>() );
+    using S =
+        runge_kutta::imex_time_step<O, P, fixed_control<O>, implicit_newton<O, I>::solver, false, invalid_projector>;
+    S invalid( ops, p, control, implicit_newton<O, I>::make( ops ), {}, std::make_shared<invalid_projector>() );
 }
 #endif
 

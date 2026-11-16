@@ -2,21 +2,24 @@
 
 using namespace projection_tests;
 
-#ifdef TEST_PROJECTION_VOID_MUST_FAIL
-struct void_projector
+#if defined( TEST_PROJECTION_BAD_RETURN_MUST_FAIL ) || defined( TEST_PROJECTION_MISSING_APPLY_MUST_FAIL )
+struct invalid_projector
 {
-    void apply( space_type::vector_type & )
+#    ifdef TEST_PROJECTION_BAD_RETURN_MUST_FAIL
+    int apply( space_type::vector_type & )
     {
+        return 1;
     }
+#    endif
 };
-void reject_void_projector(
+void reject_invalid_projector(
     std::shared_ptr<space_type> ops, std::shared_ptr<problem<space_type>> p,
     std::shared_ptr<fixed_control<space_type>> control
 )
 {
     using invalid_step = runge_kutta::explicit_time_step<
-        space_type, problem<space_type>, fixed_control<space_type>, false, void_projector>;
-    invalid_step invalid( ops, p, control, {}, std::make_shared<void_projector>() );
+        space_type, problem<space_type>, fixed_control<space_type>, false, invalid_projector>;
+    invalid_step invalid( ops, p, control, {}, std::make_shared<invalid_projector>() );
 }
 #endif
 
@@ -96,8 +99,8 @@ void check_default_and_ownership()
     }
     {
         const auto allocations = ops->allocations;
-        // The canonical identity returns void. It must never be instantiated
-        // as a Boolean projector or add a validity scan/vector allocation.
+        // Identity remains bypassed even though general void operators are now
+        // accepted; it adds no application, validity scan or vector allocation.
         auto identity = std::make_shared<nmfd::operations::ident_operator<space_type>>( ops );
         R    step( ops, p, control, R::params{ "RK4" }, identity );
         check( ops->allocations - allocations == default_storage, "Identity added workspace" );

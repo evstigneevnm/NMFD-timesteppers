@@ -12,6 +12,7 @@
 #include <utility>
 #include <nmfd/detail/vector_wrap.h>
 #include <nmfd/operations/ident_operator.h>
+#include <nmfd/time_steppers/detail/apply_operator.h>
 #include <nmfd/time_steppers/bdf/coefficients.h>
 #include <nmfd/time_steppers/bdf/history.h>
 #include <nmfd/time_steppers/bdf/order_policy.h>
@@ -68,9 +69,8 @@ public:
         if constexpr ( projects_states )
         {
             static_assert(
-                std::is_same_v<
-                    decltype( std::declval<ProjectionOperator &>().apply( std::declval<vector_type &>() ) ), bool>,
-                "BDF state projection requires bool apply(vector_type&)"
+                detail::operator_apply_traits<ProjectionOperator, vector_type>::value,
+                "Operator apply(vector&) must return void or bool"
             );
             if ( !projection_operator_ )
                 throw std::invalid_argument( "BDF requires the selected state projector" );
@@ -419,7 +419,7 @@ private:
         // and fixed linear P require P*f(t,v)=P*f(t,P*v), as for DIRK.
         if constexpr ( projects_states )
         {
-            if ( !projection_operator_->apply( state ) )
+            if ( !detail::apply_operator( *projection_operator_, state ) )
             {
                 status_ = single_step_status::failed_projection;
                 return false;

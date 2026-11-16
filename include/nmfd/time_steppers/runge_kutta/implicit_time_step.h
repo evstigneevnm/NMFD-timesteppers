@@ -12,6 +12,7 @@
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
 #include <nmfd/operations/ident_operator.h>
+#include <nmfd/time_steppers/detail/apply_operator.h>
 #include <nmfd/time_steppers/detail/affine_shift.h>
 #include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
@@ -108,9 +109,8 @@ public:
         if constexpr ( projects_stages )
         {
             static_assert(
-                std::is_same_v<
-                    decltype( std::declval<ProjectionOperator &>().apply( std::declval<vector_type &>() ) ), bool>,
-                "DIRK stage projection requires bool apply(vector_type&)"
+                nmfd::time_steppers::detail::operator_apply_traits<ProjectionOperator, vector_type>::value,
+                "Operator apply(vector&) must return void or bool"
             );
             if ( !projection_operator_ )
                 throw std::invalid_argument( "DIRK requires the selected stage projector" );
@@ -356,7 +356,7 @@ private:
     {
         if constexpr ( projects_stages )
         {
-            if ( !projection_operator_->apply( value ) )
+            if ( !nmfd::time_steppers::detail::apply_operator( *projection_operator_, value ) )
             {
                 status_ = single_step_status::failed_projection;
                 return false;

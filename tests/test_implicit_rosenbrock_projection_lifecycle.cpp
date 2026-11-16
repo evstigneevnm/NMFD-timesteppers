@@ -6,17 +6,20 @@ using L = projection_linear_solver<O>;
 using C = rosenbrock_recording_control<O>;
 using S = rosenbrock_projected_step<O, C, true>;
 
-#ifdef TEST_PROJECTION_VOID_MUST_FAIL
-struct void_projector
+#if defined( TEST_PROJECTION_BAD_RETURN_MUST_FAIL ) || defined( TEST_PROJECTION_MISSING_APPLY_MUST_FAIL )
+struct invalid_projector
 {
-    void apply( O::vector_type & )
+#    ifdef TEST_PROJECTION_BAD_RETURN_MUST_FAIL
+    int apply( O::vector_type & )
     {
+        return 1;
     }
+#    endif
 };
-void reject_void( std::shared_ptr<O> ops, std::shared_ptr<P> p, std::shared_ptr<C> c, std::shared_ptr<L> l )
+void reject_invalid( std::shared_ptr<O> ops, std::shared_ptr<P> p, std::shared_ptr<C> c, std::shared_ptr<L> l )
 {
-    rosenbrock::time_step<O, P, C, L, true, void_projector> step(
-        ops, p, c, l, {}, std::make_shared<void_projector>()
+    rosenbrock::time_step<O, P, C, L, true, invalid_projector> step(
+        ops, p, c, l, {}, std::make_shared<invalid_projector>()
     );
 }
 #endif

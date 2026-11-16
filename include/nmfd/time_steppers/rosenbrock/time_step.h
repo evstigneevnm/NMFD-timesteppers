@@ -13,6 +13,7 @@
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
 #include <nmfd/operations/ident_operator.h>
+#include <nmfd/time_steppers/detail/apply_operator.h>
 #include <nmfd/time_steppers/detail/affine_shift.h>
 #include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
@@ -74,9 +75,8 @@ public:
         if constexpr ( projects_increments )
         {
             static_assert(
-                std::is_same_v<
-                    decltype( std::declval<ProjectionOperator &>().apply( std::declval<vector_type &>() ) ), bool>,
-                "Rosenbrock increment projection requires bool apply(vector_type&)"
+                detail::operator_apply_traits<ProjectionOperator, vector_type>::value,
+                "Operator apply(vector&) must return void or bool"
             );
             if ( !projection_operator_ )
                 throw std::invalid_argument( "Rosenbrock requires the selected increment projector" );
@@ -557,7 +557,7 @@ private:
         // Fixed linear P requires P*f(v)=P*f(P*v) and P*B*(I-P)=0.
         if constexpr ( projects_increments )
         {
-            if ( !projection_operator_->apply( increment ) )
+            if ( !detail::apply_operator( *projection_operator_, increment ) )
             {
                 status_ = single_step_status::failed_projection;
                 return false;
