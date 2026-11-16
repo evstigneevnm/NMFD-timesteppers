@@ -133,7 +133,7 @@ call `invalidate_rhs_cache()` after changing the projector or its dependencies,
 just as after an independent RHS change. Reset/rejection/modified-commit rules
 remain unchanged. This is not nonlinear state normalization, a moving-constraint
 solver, or a complete pressure-correction scheme with wall boundary conditions.
-IMEX pressure splitting, BDF/Rosenbrock projections and automatic prepared
+BDF/Rosenbrock projections and automatic prepared
 shooting derivatives of the projection are not added. A prepared replay provider
 must independently supply the same projected rate and its derivative.
 
@@ -504,6 +504,40 @@ bash tests/run_all.sh --systems lorenz coupled_mass --methods BDF1 BDF2 BDF \
 ```
 
 ## IMEX RK
+
+### Optional Stage Projection
+
+`imex_time_step` appends `ProjectionOperator` after the existing `DenseOutput`
+template argument. Both constructors accept its shared instance after `params`;
+existing calls and partition/controller interfaces are unchanged. As in DIRK,
+nondefault projectors require a nonnull instance with `bool apply(vector_type&)`; the canonical
+identity is compiled out and adds no projection, validity scans or backend vectors.
+
+Each stage reference contains both previously corrected partition sums. Project
+a solved implicit stage state before recovering `kI=(Y-w)/(h*aI_ii)` and before
+evaluating the explicit partition at `Y`. Project all directly evaluated explicit,
+zero-diagonal implicit and dense-endpoint rates. Do not separately project a
+reconstructed implicit rate: it already comes from corrected states/references.
+Combined embedded defects and the validated combined dense extension use corrected
+rates; sampling invokes no projection. False/nonfinite results follow bounded
+rejection; exceptions propagate without publishing input/output or a dense view.
+Projectors must not commit physical pressure/history or alter prepared operators.
+
+The validated scope is identity mass, consistent initial data, a fixed linear
+homogeneous P and `P*fI(t,v)=P*fI(t,P*v)`. The explicit partition may be nonlinear;
+it is evaluated at the projected state. General mass/DAEs, moving constraints,
+wall-boundary pressure splitting and automatic projected shooting derivatives
+are not implied. For incompatible implicit operators, supply a consistently
+projected residual/Jacobian in the problem instead.
+
+`test_implicit_imex_projection`, `_lifecycle` and `_backend` cover all named
+pairs, independent reduced equations, pure-partition limits, nonlinear explicit
+coupling, primary orders, adaptation/dense output, signed/nonzero-time stages,
+fault injection, restart/shortening, ownership and 24576-component backend guards.
+The parent separately validates manufactured periodic Stokes and constant-advection
+Oseen with its Fourier discretization, including a 33280-component transfer guard.
+
+### Partition Execution
 
 `runge_kutta/imex_time_step.h` executes the fixed IMEX tables and `IMEX_ARK324L2SA` through
 the ordinary stepper/integrator/controller interfaces:

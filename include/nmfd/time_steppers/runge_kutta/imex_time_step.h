@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
+#include <nmfd/operations/ident_operator.h>
 #include <nmfd/time_steppers/detail/affine_shift.h>
 #include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
@@ -41,7 +42,8 @@ struct imex_dense_storage<VectorOperations, true>
 }
 
 template <
-    class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false>
+    class VectorOperations, class Problem, class TimeStepAdaptation, class NonlinearSolver, bool DenseOutput = false,
+    class ProjectionOperator = nmfd::operations::ident_operator<VectorOperations>>
 class imex_time_step
 {
 public:
@@ -50,6 +52,8 @@ public:
     using imex_operator_type     = typename decltype( std::declval<Problem &>().get_imex_operator() )::element_type;
     using explicit_operator_type = typename imex_operator_type::explicit_operator_type;
     using implicit_operator_type = typename imex_operator_type::implicit_operator_type;
+    static constexpr bool projects_stages =
+        !std::is_same_v<ProjectionOperator, nmfd::operations::ident_operator<VectorOperations>>;
 
     struct params
     {
@@ -70,11 +74,12 @@ public:
 
     imex_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
-        std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, const params &p = {}
+        std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver, const params &p = {},
+        std::shared_ptr<ProjectionOperator> projection_operator = nullptr
     )
         : imex_time_step(
               std::move( operations ), std::move( problem ), std::move( adaptation ), std::move( solver ),
-              make_imex_butcher_table( p.method ), p
+              make_imex_butcher_table( p.method ), p, std::move( projection_operator )
           )
     {
     }
@@ -83,7 +88,8 @@ public:
     imex_time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
         std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<NonlinearSolver> solver,
-        imex_butcher_table table, const params &p = {}
+        imex_butcher_table table, const params &p = {},
+        std::shared_ptr<ProjectionOperator> projection_operator = nullptr
     )
         : operations_(
               operations ? std::move( operations ) : throw std::invalid_argument( "IMEX requires vector operations" )
@@ -95,12 +101,23 @@ public:
               adaptation ? std::move( adaptation ) : throw std::invalid_argument( "IMEX requires time adaptation" )
           ),
           solver_( solver ? std::move( solver ) : throw std::invalid_argument( "IMEX requires a nonlinear solver" ) ),
-          params_( p ), table_(
-                            std::move( table.explicit_table ), std::move( table.implicit_table ), table.order,
-                            table.embedded_order(), table.dense_type()
-                        ),
+          projection_operator_( std::move( projection_operator ) ), params_( p ),
+          table_(
+              std::move( table.explicit_table ), std::move( table.implicit_table ), table.order, table.embedded_order(),
+              table.dense_type()
+          ),
           work_( *operations_ ), error_( *operations_ ), dense_( *operations_ )
     {
+        if constexpr ( projects_stages )
+        {
+            static_assert(
+                std::is_same_v<
+                    decltype( std::declval<ProjectionOperator &>().apply( std::declval<vector_type &>() ) ), bool>,
+                "IMEX stage projection requires bool apply(vector_type&)"
+            );
+            if ( !projection_operator_ )
+                throw std::invalid_argument( "IMEX requires the selected stage projector" );
+        }
         if ( !partitions_ || !partitions_->explicit_part || !partitions_->implicit_part )
             throw std::invalid_argument( "IMEX requires both partition operators" );
         if ( !p.maximum_attempts )
@@ -283,6 +300,7 @@ private:
     std::shared_ptr<imex_operator_type>                       partitions_;
     std::shared_ptr<TimeStepAdaptation>                       adaptation_;
     std::shared_ptr<NonlinearSolver>                          solver_;
+    std::shared_ptr<ProjectionOperator>                       projection_operator_;
     params                                                    params_;
     imex_butcher_table                                        table_;
     vector_wrap_type                                          work_, error_;
@@ -354,7 +372,23 @@ private:
             status_ = single_step_status::failed_solver;
             return false;
         }
-        return valid( rate );
+        return valid( rate ) && project( rate );
+    }
+
+    // For identity mass and fixed linear P, post-solve projection requires
+    // P*f_I(t,v)=P*f_I(t,P*v). Explicit rates are evaluated at the corrected state.
+    bool project( vector_type &value )
+    {
+        if constexpr ( projects_stages )
+        {
+            if ( !projection_operator_->apply( value ) )
+            {
+                status_ = single_step_status::failed_projection;
+                return false;
+            }
+            return valid( value );
+        }
+        return true;
     }
 
     // Only accepted candidates need fresh rates at the actual combined endpoint.
@@ -469,6 +503,8 @@ private:
                     return false;
                 }
                 if ( !valid( *work_ ) )
+                    return false;
+                if ( !project( *work_ ) )
                     return false;
                 if ( needs_rate( i, stage ) )
                 {
