@@ -1,5 +1,8 @@
 # NMFD Timesteppers
 
+See the authoritative [capability matrix](docs/capabilities.md) for method orders,
+mass/DAE restrictions, projection scope and linked numerical/backend evidence.
+
 Header-only C++17 time integration in `nmfd::time_steppers`. Public headers live
 under `include/nmfd/time_steppers`; simulations and verification programs are in
 `tests`. The parent project's `source/time_stepper/legacy` remains frozen and is
@@ -25,7 +28,7 @@ make format-check
 There are no nested dependency submodules or module-specific CI workflows during
 this development stage. The parent project runs its existing separate timestepper
 jobs against these sources and flat canonical dependencies. Standalone dependency
-pins and module CI will be introduced later. Future implicit methods receive their
+pins and module CI will be introduced later. Implicit methods receive their
 nonlinear solver by template injection; they must not introduce a Newton dependency
 for explicit-only users.
 
@@ -235,7 +238,7 @@ the timestepper does not infer it from a mass-matrix diagonal or invert the mass
 This balances small and large stage steps, including negative shifts and the
 zero-shift steady limit without changing Newton or solver tolerances.
 It is not a globalization controller or a timestep-aware nonlinear
-accuracy budget. Future globalization must measure progress in the original
+accuracy budget. Pseudo-time globalization measures progress in the original
 physical residual and constraints, not compare scaled norms across stage shifts.
 
 For stage i the stepper writes `previous=u_n+h*sum(a_ij*k_j)` and `known_rhs=0`,
