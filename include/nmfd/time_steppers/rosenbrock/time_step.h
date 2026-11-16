@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 #include <nmfd/detail/vector_wrap.h>
+#include <nmfd/operations/ident_operator.h>
 #include <nmfd/time_steppers/detail/affine_shift.h>
 #include <nmfd/time_steppers/detail/problem_traits.h>
 #include <nmfd/time_steppers/detail/status.h>
@@ -23,12 +24,16 @@ namespace nmfd::time_steppers::rosenbrock
 // Physical-rate ODEs (including problem-owned nonsingular mass solves) or
 // opt-in constant-mass residuals. Only W
 // tables permit approximate Jacobians. Evaluations preserve the frozen operator.
-template <class VectorOperations, class Problem, class TimeStepAdaptation, class LinearSolver, bool DenseOutput = false>
+template <
+    class VectorOperations, class Problem, class TimeStepAdaptation, class LinearSolver, bool DenseOutput = false,
+    class ProjectionOperator = nmfd::operations::ident_operator<VectorOperations>>
 class time_step
 {
 public:
     using scalar_type = typename VectorOperations::scalar_type;
     using vector_type = typename VectorOperations::vector_type;
+    static constexpr bool projects_increments =
+        !std::is_same_v<ProjectionOperator, nmfd::operations::ident_operator<VectorOperations>>;
 
     struct params
     {
@@ -50,7 +55,8 @@ public:
     // non-autonomous problems. Estimation and shared rates reuse scratch.
     time_step(
         std::shared_ptr<VectorOperations> operations, std::shared_ptr<Problem> problem,
-        std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<LinearSolver> solver, const params &p = {}
+        std::shared_ptr<TimeStepAdaptation> adaptation, std::shared_ptr<LinearSolver> solver, const params &p = {},
+        std::shared_ptr<ProjectionOperator> projection_operator = nullptr
     )
         : operations_(
               operations ? std::move( operations ) : throw std::invalid_argument( "Rosenbrock requires operations" )
@@ -62,9 +68,22 @@ public:
           solver_(
               solver ? std::move( solver ) : throw std::invalid_argument( "Rosenbrock requires a linear solver" )
           ),
-          params_( p ), table_( p.method ), work_( *operations_ ), rhs_( *operations_ ),
-          time_derivative_( *operations_ ), dense_( *operations_ )
+          projection_operator_( std::move( projection_operator ) ), params_( p ), table_( p.method ),
+          work_( *operations_ ), rhs_( *operations_ ), time_derivative_( *operations_ ), dense_( *operations_ )
     {
+        if constexpr ( projects_increments )
+        {
+            static_assert(
+                std::is_same_v<
+                    decltype( std::declval<ProjectionOperator &>().apply( std::declval<vector_type &>() ) ), bool>,
+                "Rosenbrock increment projection requires bool apply(vector_type&)"
+            );
+            if ( !projection_operator_ )
+                throw std::invalid_argument( "Rosenbrock requires the selected increment projector" );
+            if ( p.mass_form || p.index1_dae || p.index2_dae ||
+                 ( p.method != "ROS2" && p.method != "ROS3" && p.method != "ROS34PW2" ) )
+                throw std::invalid_argument( "Rosenbrock projection supports ROS2/ROS3/ROS34PW2 rate form only" );
+        }
         if ( !p.maximum_attempts )
             throw std::invalid_argument( "Rosenbrock requires a nonempty attempt budget" );
         if ( p.index1_dae && p.index2_dae )
@@ -276,6 +295,7 @@ private:
     std::shared_ptr<Problem>                                        problem_;
     std::shared_ptr<TimeStepAdaptation>                             adaptation_;
     std::shared_ptr<LinearSolver>                                   solver_;
+    std::shared_ptr<ProjectionOperator>                             projection_operator_;
     params                                                          params_;
     method_table                                                    table_;
     vector_wrap_type                                                work_, rhs_, time_derivative_;
@@ -532,6 +552,21 @@ private:
         {
             status_ = single_step_status::failed_nonfinite;
             return false;
+        }
+        // Project every stage/dense solve before its increment is consumed.
+        // Fixed linear P requires P*f(v)=P*f(P*v) and P*B*(I-P)=0.
+        if constexpr ( projects_increments )
+        {
+            if ( !projection_operator_->apply( increment ) )
+            {
+                status_ = single_step_status::failed_projection;
+                return false;
+            }
+            if ( !operations_->is_valid_number( increment ) )
+            {
+                status_ = single_step_status::failed_nonfinite;
+                return false;
+            }
         }
         return true;
     }

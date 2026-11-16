@@ -133,8 +133,7 @@ call `invalidate_rhs_cache()` after changing the projector or its dependencies,
 just as after an independent RHS change. Reset/rejection/modified-commit rules
 remain unchanged. This is not nonlinear state normalization, a moving-constraint
 solver, or a complete pressure-correction scheme with wall boundary conditions.
-Rosenbrock projections and automatic prepared
-shooting derivatives of the projection are not added. A prepared replay provider
+Automatic prepared shooting derivatives of the projection are not added. A prepared replay provider
 must independently supply the same projected rate and its derivative.
 
 `test_explicit_projection`, `test_explicit_projection_lifecycle` and
@@ -774,6 +773,40 @@ expiry. Classical continuous order does not certify stiffness-uniform accuracy
 or positivity in unresolved layers. Singular mass requires the separate index-1
 selection below. Time/state-dependent nonsingular mass requires a normalized rate
 problem, not the native constant-mass residual formula.
+
+### Optional Increment Projection
+
+Append `ProjectionOperator` after `DenseOutput` and its shared instance after
+constructor `params`, as for RK/BDF. Nondefault projectors require a nonnull
+instance and `bool apply(vector_type& increment)`. Project every successful
+ordinary or dense-only linear solve before consuming its increment. Endpoints,
+embedded defects and dense interpolation then use the projected increments;
+sampling performs no projection. False/nonfinite results follow bounded
+rejection, exceptions propagate, and failed work never publishes a candidate/view.
+Projection does not alter the frozen operator, physical rates or controller.
+
+The validated scope is `ROS2`, `ROS3`, `ROS34PW2` identity-mass/rate form,
+consistent initial data and a fixed linear homogeneous P satisfying
+`P*f(t,v)=P*f(t,P*v)`. The frozen exact/approximate B must additionally satisfy
+`P*B*(I-P)=0`; `P*B=B*P` is sufficient, not required. W approximations do not
+automatically meet this condition. These are problem-owned contracts, not
+runtime matrix-wide audits. Nondefault projection with `mass_form`, DAE flags
+or other tables is rejected; existing unprojected mass/DAE paths are unchanged.
+General pressure splitting, moving/nonlinear projection and projected prepared
+shooting derivatives are not inferred.
+
+Identity is compiled out: no projection call, additional validity scan or backend
+vector. Custom projection adds one application/check per successful linear solve,
+including native dense-only solves, with no extra timestepper vectors or bulk
+host/device transfers. Projector workspace/solver costs remain application-owned.
+For an O(N) projector, this is O(sN) additional work with fixed small s.
+
+`test_implicit_rosenbrock_projection`, `_lifecycle` and `_backend` cover exact and
+compatible zero/scaled/lagged/noncommuting W matrices, nonlinear orders, embedded
+defects, adaptive/dense/backward execution, incompatible-matrix counterexamples,
+stage/dense failures, retries, shortened endpoints, ownership and large transfer/
+allocation guards. The parent adds manufactured Stokes/Oseen, analytic forcing
+time derivatives, figures, GCC/Clang, sanitizers and available CUDA/HIP validation.
 
 ### Constant-Mass Residual Form
 
