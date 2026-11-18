@@ -22,6 +22,16 @@ IMPLICIT_GROUPS = {
     "bdf": ("bdf", "bdf_lifecycle", "bdf_mass_dae", "bdf_backend", "bdf_adaptive", "bdf_adaptive_lifecycle",
             "bdf_adaptive_mass_dae", "bdf_orders", "bdf_variable_order", "bdf_stability", "bdf_dense",
             "bdf_dense_lifecycle", "bdf_dense_mass_dae"),
+    "rosenbrock": (
+        "rosenbrock", "rosenbrock_lifecycle", "rosenbrock_backend", "rosenbrock_adaptive", "rosenbrock_nonautonomous",
+        "rosenbrock_ros3", "rosenbrock_ros3_adaptive", "rosenbrock_ros3_lifecycle", "rosenbrock_dense",
+        "rosenbrock_dense_lifecycle", "rosenbrock_w", "rosenbrock_w_adaptive", "rosenbrock_w_lifecycle",
+        "rosenbrock_w_dense", "rosenbrock_w_dense_lifecycle", "rosenbrock_mass", "rosenbrock_mass_adaptive",
+        "rosenbrock_mass_lifecycle", "rosenbrock_mass_nonautonomous", "rosenbrock_mass_time_lifecycle",
+        "rosenbrock_dae", "rosenbrock_dae_lifecycle", "rosenbrock_variable_mass", "rosenbrock_variable_mass_adaptive",
+        "rosenbrock_variable_mass_lifecycle", "rosenbrock_variable_mass_benchmarks", "rosenbrock_index2",
+        "rosenbrock_index2_moving", "rosenbrock_index2_dense", "rosenbrock_index2_lifecycle",
+    ),
 }
 GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference", *DIRK_GROUPS, *IMPLICIT_GROUPS)
 

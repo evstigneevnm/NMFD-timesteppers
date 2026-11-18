@@ -34,7 +34,7 @@ class TimestepperSuiteTest(unittest.TestCase):
             timeout = 180 if platform in ("SERIAL", "OMP") else 300
             selected = [(c.target, c.timeout, c.threads) for c in ci.cases(platform, "imex")]
             self.assertCountEqual(selected, [(f"test_implicit_{n}_{suffix}.bin", timeout, 2) for n in names])
-        for group in set(ci.GROUPS) - {"imex", "bdf"}:
+        for group in set(ci.GROUPS) - {"imex", "bdf", "rosenbrock"}:
             with self.assertRaises(ValueError):
                 list(ci.cases("HIP", group))
 
@@ -59,6 +59,15 @@ class TimestepperSuiteTest(unittest.TestCase):
             budget = 180 if platform in ("SERIAL", "OMP") else 300
             actual = [(c.target, c.threads, c.timeout) for c in ci.cases(platform, "bdf")]
             self.assertCountEqual(actual, [(f"test_implicit_{name}_{suffix}.bin", 2, budget) for name in names])
+
+    def test_rosenbrock_inventory_and_execution_budgets(self):
+        # Projection has its own parent workflow, including its Rosenbrock cases.
+        sources = [p.stem for p in Path(__file__).parent.glob("test_implicit_rosenbrock*.cpp")
+                   if not p.stem.startswith("test_implicit_rosenbrock_projection")]
+        for platform, suffix in (("SERIAL", "cpu"), ("OMP", "cpu_omp"), ("CUDA", "cuda"), ("HIP", "hip")):
+            budget = 180 if platform in ("SERIAL", "OMP") else 300
+            actual = [(c.target, c.threads, c.timeout) for c in ci.cases(platform, "rosenbrock")]
+            self.assertCountEqual(actual, [(f"{src}_{suffix}.bin", 2, budget) for src in sources])
 
     def test_execution_inventory(self):
         common = set(("rk ownership fsal scipy_adaptation filter_adaptation dop853 dop853_dense_output "
