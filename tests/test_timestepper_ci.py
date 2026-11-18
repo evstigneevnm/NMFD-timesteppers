@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import check_projection_contracts as negative
 import timestepper_ci as ci
 
 
@@ -34,9 +35,50 @@ class TimestepperSuiteTest(unittest.TestCase):
             timeout = 180 if platform in ("SERIAL", "OMP") else 300
             selected = [(c.target, c.timeout, c.threads) for c in ci.cases(platform, "imex")]
             self.assertCountEqual(selected, [(f"test_implicit_{n}_{suffix}.bin", timeout, 2) for n in names])
-        for group in set(ci.GROUPS) - {"imex", "bdf", "rosenbrock"}:
+        for group in set(ci.GROUPS) - {"imex", "bdf", "rosenbrock", "projection"}:
             with self.assertRaises(ValueError):
                 list(ci.cases("HIP", group))
+
+    def test_projection_suite_matches_module_sources_and_budgets(self):
+        names = {p.stem for p in ci.HERE.glob("test_*projection*.cpp")} | {"test_explicit_apply_operator"}
+        for platform, suffix in ci.BACKENDS.items():
+            timeout = 180 if platform in ("SERIAL", "OMP") else 300
+            self.assertCountEqual([(c.target, c.threads, c.timeout) for c in ci.cases(platform, "projection")],
+                                  [(f"{name}_{suffix}.bin", 2, timeout) for name in names])
+
+    def test_projection_compile_failure_requires_expected_diagnostic(self):
+        expected = "Operator apply(vector&) must return void or bool"
+        for rc, message, passed in ((1, expected, True), (0, expected, False), (1, "header missing", False)):
+            def compiler(cmd, stdout, **kwargs):
+                print(message, file=stdout)
+                return subprocess.CompletedProcess(cmd, rc)
+            with self.subTest(rc=rc, message=message), tempfile.TemporaryDirectory() as tmp, \
+                    contextlib.redirect_stdout(io.StringIO()), patch.object(subprocess, "run", side_effect=compiler):
+                self.assertEqual(negative.main(tmp, "c++"), 0 if passed else 1)
+                logs = {p.name for p in Path(tmp).glob("*.log")}
+                self.assertEqual(logs, {f"{f}_{bad}.log" for f in ci.PROJECTION_FAMILIES
+                                        for bad in ("BAD_RETURN", "MISSING_APPLY")})
+
+    def test_parallel_build_failure_never_runs_stale_target(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, PLATFORM="SERIAL"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            dirs, executed = set(), []
+            def invoke(cmd, **kwargs):
+                if cmd[0] == "make":
+                    path = next(t for t in reversed(cmd) if t.startswith("BUILD_DIR="))
+                    dirs.add(path)
+                    rc = 2 if cmd[-1] == "test_explicit_projection_cpu.bin" else 0
+                else:
+                    executed.append(Path(cmd[0]).name)
+                    rc = 0
+                return subprocess.CompletedProcess(cmd, rc)
+            with patch.object(subprocess, "run", side_effect=invoke):
+                self.assertEqual(ci.main(["--group", "projection", "--build-jobs", "2", "--build-dir", tmp]), 1)
+            report = json.loads((Path(tmp)/"SERIAL/projection/summary.json").read_text())
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(len(dirs), 17)
+            self.assertEqual(executed, [c.target for c in ci.cases("SERIAL", "projection")
+                                        if c.name != "explicit_projection"])
 
     def test_hip_probe_failure_is_not_a_pass(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, PLATFORM="HIP"), \

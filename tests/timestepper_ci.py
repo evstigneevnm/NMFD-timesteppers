@@ -1,5 +1,7 @@
 """Registered timestepper CI cases. The normal run_all.sh invocation remains the ODE benchmark."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
 import json
 import os
@@ -33,7 +35,9 @@ IMPLICIT_GROUPS = {
         "rosenbrock_index2_moving", "rosenbrock_index2_dense", "rosenbrock_index2_lifecycle",
     ),
 }
-GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference", *DIRK_GROUPS, *IMPLICIT_GROUPS)
+PROJECTION_FAMILIES = ("explicit", "implicit", "implicit_imex", "implicit_bdf", "implicit_rosenbrock")
+GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference", *DIRK_GROUPS, *IMPLICIT_GROUPS,
+          "projection")
 
 
 @dataclass(frozen=True)
@@ -48,16 +52,28 @@ class Case:
     expected_message: str = ""
 
 
+def projection_case(platform, name):
+    return Case(name, f"test_{name}_{BACKENDS[platform]}.bin", threads=2,
+                timeout=300 if platform in ("CUDA", "HIP") else 180)
+
+
 def cases(platform, group):
     backend = BACKENDS[platform]
     cuda = platform == "CUDA"
+    if group == "projection":
+        for name in ("explicit_apply_operator", "implicit_operator_projection"):
+            yield projection_case(platform, name)
+        for family in PROJECTION_FAMILIES:
+            for suffix in ("projection", "projection_lifecycle", "projection_backend"):
+                yield projection_case(platform, f"{family}_{suffix}")
+        return
     if group in IMPLICIT_GROUPS:
         for name in IMPLICIT_GROUPS[group]:
             yield Case(name, f"test_implicit_{name}_{backend}.bin", threads=2,
                        timeout=300 if platform in ("CUDA", "HIP") else 180)
         return
     if platform == "HIP":
-        raise ValueError(f"HIP is registered only for: {', '.join(IMPLICIT_GROUPS)}")
+        raise ValueError(f"HIP is registered only for: {', '.join(IMPLICIT_GROUPS)}, projection")
     if group in DIRK_GROUPS:
         if group == "dirk-core" and platform == "SERIAL":
             yield Case("table", "test_rk_tables_implicit.bin", threads=2)
@@ -103,21 +119,26 @@ def cases(platform, group):
                    expected_exit=1, expected_message="This simulation uses constant stepping only for RK4")
 
 
-def main(argv=None):
+def run_profile(argv, groups, select_cases, make_dir, probe_target=None):
+    """Run a directory's registered cases with the same build, probe and reporting policy."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--group", choices=GROUPS, default="explicit-rk")
+    parser.add_argument("--group", choices=groups, default=groups[0])
     parser.add_argument("--list", action="store_true", help="List selected cases without building or probing")
     parser.add_argument("-B", action="store_true", dest="build_only", help="Force build only")
+    parser.add_argument("--build-jobs", type=int, choices=(1, 2), default=1,
+                        help="Compile up to two CPU targets concurrently; numerical runs remain sequential")
     parser.add_argument("--build-dir", type=Path, help="Build and report root (default depends on the method family)")
-    parser.add_argument("--make-dir", type=Path, default=HERE.parent, help="Makefile providing the binary targets")
+    parser.add_argument("--make-dir", type=Path, default=make_dir, help="Makefile providing the binary targets")
     parser.add_argument("--make-option", action="append", default=[], help="Pass one variable assignment to Make")
-    parser.add_argument("--device-probe-target", help="Integration Make target for required CUDA/HIP preflight")
+    parser.add_argument("--device-probe-target", default=probe_target, help="Integration Make target for required CUDA/HIP preflight")
     args = parser.parse_args(argv)
     platform = os.environ.get("PLATFORM", "SERIAL")
     if platform not in BACKENDS:
         parser.error(f"Unsupported PLATFORM={platform!r}; choose from {', '.join(BACKENDS)}")
+    if args.build_jobs > 1 and platform not in ("SERIAL", "OMP"):
+        parser.error("Concurrent builds are supported on CPU only")
     try:
-        selected = list(cases(platform, args.group))
+        selected = list(select_cases(platform, args.group))
     except ValueError as error:
         parser.error(str(error))
     if args.list:
@@ -127,14 +148,14 @@ def main(argv=None):
 
     if platform == "HIP" and args.make_dir.resolve() == HERE.parent:
         parser.error("The standalone Makefile has no HIP targets; use the parent make test-timesteppers or --make-dir")
-    family = args.group if args.group in IMPLICIT_GROUPS else ("dirk" if args.group in DIRK_GROUPS else "explicit_rk")
+    family = ("dirk" if args.group in DIRK_GROUPS else
+              args.group if args.group in IMPLICIT_GROUPS or args.group == "projection" else "explicit_rk")
     default_dir = f"{family}_ci"
     root = args.build_dir or Path("build")/default_dir
     directory = root.resolve()/platform/args.group
     binaries = directory/"bin"
     binaries.mkdir(parents=True, exist_ok=True)
-    make = ["make", "--no-print-directory", "-C", str(args.make_dir.resolve()), *args.make_option,
-            f"BUILD_DIR={binaries}"]
+    make = ["make", "--no-print-directory", "-C", str(args.make_dir.resolve()), *args.make_option]
     if args.build_only:
         make.append("-B")
     if platform == "CUDA":
@@ -142,6 +163,8 @@ def main(argv=None):
             make.append("REAL_TYPE=double")
         if os.environ.get("NVCC"):
             make.append("NVCC=" + os.environ["NVCC"])
+    def make_target(target, bindir):
+        return [*make, f"BUILD_DIR={bindir}", target]
     report = dict(platform=platform, group=args.group, build_only=args.build_only, status="running", passed=False,
                   selected=[case.name for case in selected], results={})
     def save():
@@ -151,7 +174,7 @@ def main(argv=None):
     if gpu and args.device_probe_target and not args.build_only:
         with (directory/"probe.log").open("w") as log:
             try:
-                subprocess.run([*make, args.device_probe_target], stdout=log, stderr=subprocess.STDOUT,
+                subprocess.run(make_target(args.device_probe_target, binaries), stdout=log, stderr=subprocess.STDOUT,
                                timeout=120, check=True)
             except (OSError, subprocess.SubprocessError) as error:
                 report["status"] = "failed"
@@ -160,24 +183,43 @@ def main(argv=None):
                 print(f"{report['error']}; see {directory}/probe.log", file=sys.stderr)
                 return 1
 
-    built = set()
-    for case in selected:
+    def invoke(command, log, env, timeout, expected=0):
+        print("+", *command, file=log, flush=True)
+        rc = subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT,
+                            env=env, timeout=timeout).returncode
+        if rc != expected:
+            raise RuntimeError(f"expected exit {expected}, got {rc}")
+
+    def compile_ahead(case, bindir, env):
+        # Parent Make recipes also write results.make. Isolate simultaneous targets.
+        bindir.mkdir(exist_ok=True)
+        start = time.monotonic()
+        with (directory/(case.name+".build.log")).open("w") as log:
+            try:
+                invoke(make_target(case.target, bindir), log, env, 300)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                if (bindir/"results.make").exists():
+                    print((bindir/"results.make").read_text(errors="replace"), file=log)
+                raise
+        return time.monotonic()-start
+
+    def execute(case, bindir, env, built, future):
         start = time.monotonic()
         path = directory/(case.name+".log")
+        compilation = 0
         with path.open("w") as log:
-            env = os.environ if gpu else dict(os.environ, OMP_NUM_THREADS=str(case.threads))
             def run(command, timeout, expected=0):
-                print("+", *command, file=log, flush=True)
-                rc = subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT,
-                                    env=env, timeout=timeout).returncode
-                if rc != expected:
-                    raise RuntimeError(f"expected exit {expected}, got {rc}")
+                invoke(command, log, env, timeout, expected)
             try:
                 if case.target not in built:
-                    run([*make, case.target], 300)
+                    if future is None:
+                        run(make_target(case.target, bindir), 300)
+                    else:
+                        compilation = future.result()
+                        start = time.monotonic()
                     built.add(case.target)
                 if not args.build_only:
-                    run([str(binaries/case.target), *case.args], case.timeout, case.expected_exit)
+                    run([str(bindir/case.target), *case.args], case.timeout, case.expected_exit)
                     if case.expected_message and case.expected_message not in path.read_text(errors="replace"):
                         raise RuntimeError(f"missing expected diagnostic: {case.expected_message}")
                     if case.compare:
@@ -185,18 +227,36 @@ def main(argv=None):
                 status = "built" if args.build_only else "passed"
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 print(error, file=log)
-                if case.target not in built and (binaries/"results.make").exists():
-                    print((binaries/"results.make").read_text(errors="replace"), file=log)
+                if future is None and case.target not in built and (bindir/"results.make").exists():
+                    print((bindir/"results.make").read_text(errors="replace"), file=log)
                 status = "failed"
-        elapsed = round(time.monotonic()-start, 2)
+        elapsed = round(compilation+time.monotonic()-start, 2)
         report["results"][case.name] = dict(status=status, seconds=elapsed)
         save()
         print(f"{platform}/{args.group}/{case.name}: {status} ({elapsed}s, {path})", flush=True)
+
+    def environment(case):
+        return os.environ if gpu else dict(os.environ, OMP_NUM_THREADS=str(case.threads))
+
+    built, builds = set(), {}
+    with (ThreadPoolExecutor(args.build_jobs) if args.build_jobs > 1 else nullcontext()) as pool:
+        for case in selected:
+            if case.target not in builds:
+                bindir = binaries/case.name if pool else binaries
+                future = pool.submit(compile_ahead, case, bindir, environment(case)) if pool else None
+                builds[case.target] = bindir, future
+        for case in selected:
+            bindir, future = builds[case.target]
+            execute(case, bindir, environment(case), built, future)
     success = all(row["status"] != "failed" for row in report["results"].values())
     report["status"] = ("built" if args.build_only else "passed") if success else "failed"
     report["passed"] = report["status"] == "passed"
     save()
     return 0 if success else 1
+
+
+def main(argv=None):
+    return run_profile(argv, GROUPS, cases, HERE.parent)
 
 
 if __name__ == "__main__":

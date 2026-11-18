@@ -1334,6 +1334,7 @@ PLATFORM=OMP bash tests/run_all.sh --profile ci --group dirk-core
 PLATFORM=OMP bash tests/run_all.sh --profile ci --group imex
 PLATFORM=OMP bash tests/run_all.sh --profile ci --group bdf
 PLATFORM=OMP bash tests/run_all.sh --profile ci --group rosenbrock
+PLATFORM=OMP bash tests/run_all.sh --profile ci --group projection
 ```
 
 The core group supports SERIAL (default), OMP and CUDA. The optional reference
@@ -1344,6 +1345,9 @@ The implicit groups `dirk-core` and `dirk-extensions` support the same three
 platforms and default to `build/dirk_ci/PLATFORM/group`. The `imex`, `bdf` and `rosenbrock`
 groups write to `build/<group>_ci/PLATFORM/<group>` and can also run on HIP when a
 HIP-capable Makefile is supplied with `--make-dir` (e.g. the parent project).
+The `projection` group follows the same platform rules and runs the 17 module
+contracts. Application-specific Stokes tests are added only by the parent.
+Use `--build-jobs 2` for concurrent CPU compilation with sequential test execution.
 Pass `-B` after
 `--profile ci` to force a build without recording a numerical pass.
 
