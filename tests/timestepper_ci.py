@@ -1,4 +1,4 @@
-"""Registered Runge-Kutta CI cases. The normal run_all.sh invocation remains the ODE benchmark."""
+"""Registered timestepper CI cases. The normal run_all.sh invocation remains the ODE benchmark."""
 import argparse
 from dataclasses import dataclass
 import json
@@ -16,7 +16,14 @@ DIRK_GROUPS = {
                         "dense_mass_dae", "globalization", "nonnormal_steady_state", "lorenz_steady_state",
                         "rossler_steady_state", "vdp_steady_state"),
 }
-GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference", *DIRK_GROUPS, "imex")
+IMPLICIT_GROUPS = {
+    "imex": ("imex", "imex_adaptive", "imex_mass", "imex_lifecycle", "imex_backend", "imex_benchmarks",
+             "imex_dense_output", "imex_dense_lifecycle"),
+    "bdf": ("bdf", "bdf_lifecycle", "bdf_mass_dae", "bdf_backend", "bdf_adaptive", "bdf_adaptive_lifecycle",
+            "bdf_adaptive_mass_dae", "bdf_orders", "bdf_variable_order", "bdf_stability", "bdf_dense",
+            "bdf_dense_lifecycle", "bdf_dense_mass_dae"),
+}
+GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference", *DIRK_GROUPS, *IMPLICIT_GROUPS)
 
 
 @dataclass(frozen=True)
@@ -34,14 +41,13 @@ class Case:
 def cases(platform, group):
     backend = BACKENDS[platform]
     cuda = platform == "CUDA"
-    if group == "imex":
-        for name in ("imex", "imex_adaptive", "imex_mass", "imex_lifecycle", "imex_backend", "imex_benchmarks",
-                     "imex_dense_output", "imex_dense_lifecycle"):
+    if group in IMPLICIT_GROUPS:
+        for name in IMPLICIT_GROUPS[group]:
             yield Case(name, f"test_implicit_{name}_{backend}.bin", threads=2,
                        timeout=300 if platform in ("CUDA", "HIP") else 180)
         return
     if platform == "HIP":
-        raise ValueError("HIP is registered only for the imex group")
+        raise ValueError(f"HIP is registered only for: {', '.join(IMPLICIT_GROUPS)}")
     if group in DIRK_GROUPS:
         if group == "dirk-core" and platform == "SERIAL":
             yield Case("table", "test_rk_tables_implicit.bin", threads=2)
@@ -92,14 +98,14 @@ def main(argv=None):
     parser.add_argument("--group", choices=GROUPS, default="explicit-rk")
     parser.add_argument("--list", action="store_true", help="List selected cases without building or probing")
     parser.add_argument("-B", action="store_true", dest="build_only", help="Force build only")
-    parser.add_argument("--build-dir", type=Path, help="Build and report root (default depends on the RK family)")
+    parser.add_argument("--build-dir", type=Path, help="Build and report root (default depends on the method family)")
     parser.add_argument("--make-dir", type=Path, default=HERE.parent, help="Makefile providing the binary targets")
     parser.add_argument("--make-option", action="append", default=[], help="Pass one variable assignment to Make")
     parser.add_argument("--device-probe-target", help="Integration Make target for required CUDA/HIP preflight")
     args = parser.parse_args(argv)
     platform = os.environ.get("PLATFORM", "SERIAL")
     if platform not in BACKENDS:
-        parser.error(f"Unsupported RK PLATFORM={platform!r}; choose from {', '.join(BACKENDS)}")
+        parser.error(f"Unsupported PLATFORM={platform!r}; choose from {', '.join(BACKENDS)}")
     try:
         selected = list(cases(platform, args.group))
     except ValueError as error:
@@ -110,8 +116,9 @@ def main(argv=None):
         return 0
 
     if platform == "HIP" and args.make_dir.resolve() == HERE.parent:
-        parser.error("The standalone Makefile has no HIP targets; use the parent make test-rk or --make-dir")
-    default_dir = "imex_ci" if args.group == "imex" else "dirk_ci" if args.group in DIRK_GROUPS else "explicit_rk_ci"
+        parser.error("The standalone Makefile has no HIP targets; use the parent make test-timesteppers or --make-dir")
+    family = args.group if args.group in IMPLICIT_GROUPS else ("dirk" if args.group in DIRK_GROUPS else "explicit_rk")
+    default_dir = f"{family}_ci"
     root = args.build_dir or Path("build")/default_dir
     directory = root.resolve()/platform/args.group
     binaries = directory/"bin"

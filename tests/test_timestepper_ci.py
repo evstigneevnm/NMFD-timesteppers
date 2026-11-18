@@ -1,4 +1,4 @@
-"""RK coverage inventory and suite lifecycle; no compiler or GPU required."""
+"""Timestepper coverage inventory and suite lifecycle; no compiler or GPU required."""
 import contextlib
 import io
 import json
@@ -9,10 +9,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import rk_ci as ci
+import timestepper_ci as ci
 
 
-class RungeKuttaSuiteTest(unittest.TestCase):
+class TimestepperSuiteTest(unittest.TestCase):
     def test_dirk_matrix_and_execution_budgets(self):
         for platform in ("SERIAL", "OMP", "CUDA"):
             backend = ci.BACKENDS[platform]
@@ -34,7 +34,7 @@ class RungeKuttaSuiteTest(unittest.TestCase):
             timeout = 180 if platform in ("SERIAL", "OMP") else 300
             selected = [(c.target, c.timeout, c.threads) for c in ci.cases(platform, "imex")]
             self.assertCountEqual(selected, [(f"test_implicit_{n}_{suffix}.bin", timeout, 2) for n in names])
-        for group in set(ci.GROUPS) - {"imex"}:
+        for group in set(ci.GROUPS) - {"imex", "bdf"}:
             with self.assertRaises(ValueError):
                 list(ci.cases("HIP", group))
 
@@ -50,6 +50,15 @@ class RungeKuttaSuiteTest(unittest.TestCase):
             self.assertEqual(report["status"], "failed")
             self.assertIn("HIP probe failed", report["error"])
             self.assertFalse(report["results"])
+
+    def test_bdf_inventory_and_execution_budgets(self):
+        names = ("bdf bdf_lifecycle bdf_mass_dae bdf_backend bdf_adaptive bdf_adaptive_lifecycle "
+                 "bdf_adaptive_mass_dae bdf_orders bdf_variable_order bdf_stability bdf_dense "
+                 "bdf_dense_lifecycle bdf_dense_mass_dae").split()
+        for platform, suffix in (("SERIAL", "cpu"), ("OMP", "cpu_omp"), ("CUDA", "cuda"), ("HIP", "hip")):
+            budget = 180 if platform in ("SERIAL", "OMP") else 300
+            actual = [(c.target, c.threads, c.timeout) for c in ci.cases(platform, "bdf")]
+            self.assertCountEqual(actual, [(f"test_implicit_{name}_{suffix}.bin", 2, budget) for name in names])
 
     def test_execution_inventory(self):
         common = set(("rk ownership fsal scipy_adaptation filter_adaptation dop853 dop853_dense_output "
