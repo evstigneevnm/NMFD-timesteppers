@@ -14,7 +14,8 @@ import rk_ci as ci
 
 class RungeKuttaSuiteTest(unittest.TestCase):
     def test_dirk_matrix_and_execution_budgets(self):
-        for platform, backend in ci.BACKENDS.items():
+        for platform in ("SERIAL", "OMP", "CUDA"):
+            backend = ci.BACKENDS[platform]
             selected = [c for group in ("dirk-core", "dirk-extensions") for c in ci.cases(platform, group)]
             ordinary = ("dirk mass_dae lifecycle lorenz rossler vdp globalization nonnormal_steady_state "
                         "lorenz_steady_state rossler_steady_state vdp_steady_state").split()
@@ -25,6 +26,30 @@ class RungeKuttaSuiteTest(unittest.TestCase):
             if platform == "SERIAL":
                 expected.append(("test_rk_tables_implicit.bin", 2, 300))
             self.assertCountEqual([(c.target, c.threads, c.timeout) for c in selected], expected)
+
+    def test_imex_inventory_and_platform_limits(self):
+        names = ("imex", "imex_adaptive", "imex_mass", "imex_lifecycle", "imex_backend", "imex_benchmarks",
+                 "imex_dense_output", "imex_dense_lifecycle")
+        for platform, suffix in (("SERIAL", "cpu"), ("OMP", "cpu_omp"), ("CUDA", "cuda"), ("HIP", "hip")):
+            timeout = 180 if platform in ("SERIAL", "OMP") else 300
+            selected = [(c.target, c.timeout, c.threads) for c in ci.cases(platform, "imex")]
+            self.assertCountEqual(selected, [(f"test_implicit_{n}_{suffix}.bin", timeout, 2) for n in names])
+        for group in set(ci.GROUPS) - {"imex"}:
+            with self.assertRaises(ValueError):
+                list(ci.cases("HIP", group))
+
+    def test_hip_probe_failure_is_not_a_pass(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, PLATFORM="HIP"), \
+                patch.object(subprocess, "run", side_effect=subprocess.CalledProcessError(1, "probe")) as run, \
+                contextlib.redirect_stderr(io.StringIO()):
+            args = ["--group", "imex", "--make-dir", tmp, "--build-dir", tmp, "--device-probe-target", "probe"]
+            self.assertEqual(ci.main(args), 1)
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0][-1], "probe")
+            report = json.loads((Path(tmp)/"HIP/imex/summary.json").read_text())
+            self.assertEqual(report["status"], "failed")
+            self.assertIn("HIP probe failed", report["error"])
+            self.assertFalse(report["results"])
 
     def test_execution_inventory(self):
         common = set(("rk ownership fsal scipy_adaptation filter_adaptation dop853 dop853_dense_output "
@@ -67,7 +92,7 @@ class RungeKuttaSuiteTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, PLATFORM="CUDA"), \
                 patch.object(subprocess, "run") as run, contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
-            args = ["--build-dir", tmp, "--device-probe-target", "probe"]
+            args = ["--build-dir", tmp, "--device-probe-target", "probe", "--make-option", "G++ = clang++"]
             self.assertEqual(ci.main([*args, "--list"]), 0)
             run.assert_not_called()
             run.return_value.returncode = 0
@@ -78,6 +103,7 @@ class RungeKuttaSuiteTest(unittest.TestCase):
             self.assertFalse(report["passed"])
             for call in run.call_args_list:
                 self.assertEqual(call.args[0][0], "make")
+                self.assertIn("G++ = clang++", call.args[0])
                 self.assertIn("-B", call.args[0])
                 self.assertNotIn("probe", call.args[0])
             run.reset_mock()

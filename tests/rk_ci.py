@@ -9,14 +9,14 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-BACKENDS = {"SERIAL": "cpu", "OMP": "cpu_omp", "CUDA": "cuda"}
+BACKENDS = {"SERIAL": "cpu", "OMP": "cpu_omp", "CUDA": "cuda", "HIP": "hip"}
 DIRK_GROUPS = {
     "dirk-core": ("dirk", "adaptive", "mass_dae", "lifecycle", "nonautonomous", "lorenz", "rossler", "vdp"),
     "dirk-extensions": ("esdirk", "esdirk_adaptive", "esdirk_mass_dae", "dense_output", "dense_lifecycle",
                         "dense_mass_dae", "globalization", "nonnormal_steady_state", "lorenz_steady_state",
                         "rossler_steady_state", "vdp_steady_state"),
 }
-GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference", *DIRK_GROUPS)
+GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference", *DIRK_GROUPS, "imex")
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,14 @@ class Case:
 def cases(platform, group):
     backend = BACKENDS[platform]
     cuda = platform == "CUDA"
+    if group == "imex":
+        for name in ("imex", "imex_adaptive", "imex_mass", "imex_lifecycle", "imex_backend", "imex_benchmarks",
+                     "imex_dense_output", "imex_dense_lifecycle"):
+            yield Case(name, f"test_implicit_{name}_{backend}.bin", threads=2,
+                       timeout=300 if platform in ("CUDA", "HIP") else 180)
+        return
+    if platform == "HIP":
+        raise ValueError("HIP is registered only for the imex group")
     if group in DIRK_GROUPS:
         if group == "dirk-core" and platform == "SERIAL":
             yield Case("table", "test_rk_tables_implicit.bin", threads=2)
@@ -86,11 +94,12 @@ def main(argv=None):
     parser.add_argument("-B", action="store_true", dest="build_only", help="Force build only")
     parser.add_argument("--build-dir", type=Path, help="Build and report root (default depends on the RK family)")
     parser.add_argument("--make-dir", type=Path, default=HERE.parent, help="Makefile providing the binary targets")
-    parser.add_argument("--device-probe-target", help="Optional integration Make target for required CUDA preflight")
+    parser.add_argument("--make-option", action="append", default=[], help="Pass one variable assignment to Make")
+    parser.add_argument("--device-probe-target", help="Integration Make target for required CUDA/HIP preflight")
     args = parser.parse_args(argv)
     platform = os.environ.get("PLATFORM", "SERIAL")
     if platform not in BACKENDS:
-        parser.error(f"Unsupported RK PLATFORM={platform!r}; choose SERIAL, OMP or CUDA")
+        parser.error(f"Unsupported RK PLATFORM={platform!r}; choose from {', '.join(BACKENDS)}")
     try:
         selected = list(cases(platform, args.group))
     except ValueError as error:
@@ -100,15 +109,19 @@ def main(argv=None):
             print(case.name, case.target, *case.args)
         return 0
 
-    root = args.build_dir or Path("build/dirk_ci" if args.group in DIRK_GROUPS else "build/explicit_rk_ci")
+    if platform == "HIP" and args.make_dir.resolve() == HERE.parent:
+        parser.error("The standalone Makefile has no HIP targets; use the parent make test-rk or --make-dir")
+    default_dir = "imex_ci" if args.group == "imex" else "dirk_ci" if args.group in DIRK_GROUPS else "explicit_rk_ci"
+    root = args.build_dir or Path("build")/default_dir
     directory = root.resolve()/platform/args.group
     binaries = directory/"bin"
     binaries.mkdir(parents=True, exist_ok=True)
-    make = ["make", "--no-print-directory", "-C", str(args.make_dir.resolve()), f"BUILD_DIR={binaries}"]
+    make = ["make", "--no-print-directory", "-C", str(args.make_dir.resolve()), *args.make_option,
+            f"BUILD_DIR={binaries}"]
     if args.build_only:
         make.append("-B")
     if platform == "CUDA":
-        if args.group not in DIRK_GROUPS:
+        if args.group == "explicit-rk":
             make.append("REAL_TYPE=double")
         if os.environ.get("NVCC"):
             make.append("NVCC=" + os.environ["NVCC"])
@@ -117,14 +130,15 @@ def main(argv=None):
     def save():
         (directory/"summary.json").write_text(json.dumps(report, indent=2)+"\n")
     save()
-    if platform == "CUDA" and args.device_probe_target and not args.build_only:
+    gpu = platform in ("CUDA", "HIP")
+    if gpu and args.device_probe_target and not args.build_only:
         with (directory/"probe.log").open("w") as log:
             try:
                 subprocess.run([*make, args.device_probe_target], stdout=log, stderr=subprocess.STDOUT,
                                timeout=120, check=True)
             except (OSError, subprocess.SubprocessError) as error:
                 report["status"] = "failed"
-                report["error"] = f"CUDA probe failed: {error}"
+                report["error"] = f"{platform} probe failed: {error}"
                 save()
                 print(f"{report['error']}; see {directory}/probe.log", file=sys.stderr)
                 return 1
@@ -134,7 +148,7 @@ def main(argv=None):
         start = time.monotonic()
         path = directory/(case.name+".log")
         with path.open("w") as log:
-            env = dict(os.environ, OMP_NUM_THREADS=str(case.threads)) if platform != "CUDA" else os.environ
+            env = os.environ if gpu else dict(os.environ, OMP_NUM_THREADS=str(case.threads))
             def run(command, timeout, expected=0):
                 print("+", *command, file=log, flush=True)
                 rc = subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT,

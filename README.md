@@ -1331,6 +1331,7 @@ For the RK regression suites rather than the visual benchmarks, put
 PLATFORM=OMP bash tests/run_all.sh --profile ci --list
 PLATFORM=SERIAL bash tests/run_all.sh --profile ci --group rk4-reference
 PLATFORM=OMP bash tests/run_all.sh --profile ci --group dirk-core
+PLATFORM=OMP bash tests/run_all.sh --profile ci --group imex
 ```
 
 The core group supports SERIAL (default), OMP and CUDA. The optional reference
@@ -1338,7 +1339,10 @@ groups (`rk4-reference`, `lorenz-reference`, `dop853-reference`) run on SERIAL
 or OMP with the Python reference dependencies. Each group writes logs and
 `summary.json` under `build/explicit_rk_ci/PLATFORM/group` for explicit RK.
 The implicit groups `dirk-core` and `dirk-extensions` support the same three
-platforms and default to `build/dirk_ci/PLATFORM/group`. Pass `-B` after
+platforms and default to `build/dirk_ci/PLATFORM/group`. The `imex` group
+writes to `build/imex_ci/PLATFORM/imex` and can also run on HIP when a
+HIP-capable Makefile is supplied with `--make-dir` (e.g. the parent project).
+Pass `-B` after
 `--profile ci` to force a build without recording a numerical pass.
 
 From the parent project root (or from the standalone library checkout), run:
