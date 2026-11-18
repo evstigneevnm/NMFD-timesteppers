@@ -1,4 +1,4 @@
-"""Explicit RK coverage inventory and suite lifecycle; no compiler or GPU required."""
+"""RK coverage inventory and suite lifecycle; no compiler or GPU required."""
 import contextlib
 import io
 import json
@@ -9,10 +9,23 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import explicit_ci as ci
+import rk_ci as ci
 
 
-class ExplicitSuiteTest(unittest.TestCase):
+class RungeKuttaSuiteTest(unittest.TestCase):
+    def test_dirk_matrix_and_execution_budgets(self):
+        for platform, backend in ci.BACKENDS.items():
+            selected = [c for group in ("dirk-core", "dirk-extensions") for c in ci.cases(platform, group)]
+            ordinary = ("dirk mass_dae lifecycle lorenz rossler vdp globalization nonnormal_steady_state "
+                        "lorenz_steady_state rossler_steady_state vdp_steady_state").split()
+            extended = ("adaptive nonautonomous esdirk esdirk_adaptive esdirk_mass_dae dense_output "
+                        "dense_lifecycle dense_mass_dae").split()
+            expected = [(f"test_implicit_{name}_{backend}.bin", 2, 300 if platform == "CUDA" else budget)
+                        for names, budget in ((ordinary, 120), (extended, 180)) for name in names]
+            if platform == "SERIAL":
+                expected.append(("test_rk_tables_implicit.bin", 2, 300))
+            self.assertCountEqual([(c.target, c.threads, c.timeout) for c in selected], expected)
+
     def test_execution_inventory(self):
         common = set(("rk ownership fsal scipy_adaptation filter_adaptation dop853 dop853_dense_output "
                       "dop853_adaptive lorenz rossler vdp nonautonomous dense_output lorenz_dense_output "

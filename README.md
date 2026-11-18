@@ -1324,18 +1324,21 @@ MATLAB, SciPy or filter controller. No timestepper method signatures change.
 
 ## Visual ODE Benchmarks
 
-For the explicit RK regression suite rather than the visual benchmarks, put
+For the RK regression suites rather than the visual benchmarks, put
 `--profile ci` first. For example, from the module checkout:
 
 ```bash
 PLATFORM=OMP bash tests/run_all.sh --profile ci --list
 PLATFORM=SERIAL bash tests/run_all.sh --profile ci --group rk4-reference
+PLATFORM=OMP bash tests/run_all.sh --profile ci --group dirk-core
 ```
 
 The core group supports SERIAL (default), OMP and CUDA. The optional reference
 groups (`rk4-reference`, `lorenz-reference`, `dop853-reference`) run on SERIAL
 or OMP with the Python reference dependencies. Each group writes logs and
-`summary.json` under `build/explicit_rk_ci/PLATFORM/group`. Pass `-B` after
+`summary.json` under `build/explicit_rk_ci/PLATFORM/group` for explicit RK.
+The implicit groups `dirk-core` and `dirk-extensions` support the same three
+platforms and default to `build/dirk_ci/PLATFORM/group`. Pass `-B` after
 `--profile ci` to force a build without recording a numerical pass.
 
 From the parent project root (or from the standalone library checkout), run:

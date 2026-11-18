@@ -11,6 +11,6 @@ fi
 if [[ ${1:-} == --profile ]]; then
     [[ ${2:-} == ci ]] || { echo "Expected --profile ci" >&2; exit 2; }
     shift 2
-    exec "$python" "$here/explicit_ci.py" "$@"
+    exec "$python" "$here/rk_ci.py" "$@"
 fi
 exec "$python" "$here/ode_benchmarks.py" "$@"

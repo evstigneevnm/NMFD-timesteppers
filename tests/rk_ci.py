@@ -1,4 +1,4 @@
-"""Registered explicit RK CI cases. The normal run_all.sh invocation remains the ODE benchmark."""
+"""Registered Runge-Kutta CI cases. The normal run_all.sh invocation remains the ODE benchmark."""
 import argparse
 from dataclasses import dataclass
 import json
@@ -10,7 +10,13 @@ import time
 
 HERE = Path(__file__).resolve().parent
 BACKENDS = {"SERIAL": "cpu", "OMP": "cpu_omp", "CUDA": "cuda"}
-GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference")
+DIRK_GROUPS = {
+    "dirk-core": ("dirk", "adaptive", "mass_dae", "lifecycle", "nonautonomous", "lorenz", "rossler", "vdp"),
+    "dirk-extensions": ("esdirk", "esdirk_adaptive", "esdirk_mass_dae", "dense_output", "dense_lifecycle",
+                        "dense_mass_dae", "globalization", "nonnormal_steady_state", "lorenz_steady_state",
+                        "rossler_steady_state", "vdp_steady_state"),
+}
+GROUPS = ("explicit-rk", "dop853-reference", "lorenz-reference", "rk4-reference", *DIRK_GROUPS)
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,14 @@ class Case:
 def cases(platform, group):
     backend = BACKENDS[platform]
     cuda = platform == "CUDA"
+    if group in DIRK_GROUPS:
+        if group == "dirk-core" and platform == "SERIAL":
+            yield Case("table", "test_rk_tables_implicit.bin", threads=2)
+        for name in DIRK_GROUPS[group]:
+            longer = name in ("adaptive", "nonautonomous") or name.startswith(("esdirk", "dense_"))
+            cpu_timeout = 180 if longer else 120
+            yield Case(name, f"test_implicit_{name}_{backend}.bin", threads=2, timeout=300 if cuda else cpu_timeout)
+        return
     def target(name):
         return f"test_explicit_{name}_{backend}.bin"
 
@@ -70,13 +84,13 @@ def main(argv=None):
     parser.add_argument("--group", choices=GROUPS, default="explicit-rk")
     parser.add_argument("--list", action="store_true", help="List selected cases without building or probing")
     parser.add_argument("-B", action="store_true", dest="build_only", help="Force build only")
-    parser.add_argument("--build-dir", type=Path, default=Path("build/explicit_rk_ci"))
+    parser.add_argument("--build-dir", type=Path, help="Build and report root (default depends on the RK family)")
     parser.add_argument("--make-dir", type=Path, default=HERE.parent, help="Makefile providing the binary targets")
     parser.add_argument("--device-probe-target", help="Optional integration Make target for required CUDA preflight")
     args = parser.parse_args(argv)
     platform = os.environ.get("PLATFORM", "SERIAL")
     if platform not in BACKENDS:
-        parser.error(f"Unsupported explicit RK PLATFORM={platform!r}; choose SERIAL, OMP or CUDA")
+        parser.error(f"Unsupported RK PLATFORM={platform!r}; choose SERIAL, OMP or CUDA")
     try:
         selected = list(cases(platform, args.group))
     except ValueError as error:
@@ -86,14 +100,16 @@ def main(argv=None):
             print(case.name, case.target, *case.args)
         return 0
 
-    directory = args.build_dir.resolve()/platform/args.group
+    root = args.build_dir or Path("build/dirk_ci" if args.group in DIRK_GROUPS else "build/explicit_rk_ci")
+    directory = root.resolve()/platform/args.group
     binaries = directory/"bin"
     binaries.mkdir(parents=True, exist_ok=True)
     make = ["make", "--no-print-directory", "-C", str(args.make_dir.resolve()), f"BUILD_DIR={binaries}"]
     if args.build_only:
         make.append("-B")
     if platform == "CUDA":
-        make.append("REAL_TYPE=double")
+        if args.group not in DIRK_GROUPS:
+            make.append("REAL_TYPE=double")
         if os.environ.get("NVCC"):
             make.append("NVCC=" + os.environ["NVCC"])
     report = dict(platform=platform, group=args.group, build_only=args.build_only, status="running", passed=False,
