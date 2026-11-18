@@ -64,6 +64,7 @@ velocity order three does not imply order-three raw moving multipliers.
 | DIRK/BDF variable nonsingular mass | V: shifted residual/Jacobian include mass derivatives; zero-diagonal stages need a consistent rate | [mass/DAE](../tests/test_implicit_mass_dae.cpp), [BDF](../tests/test_implicit_bdf_adaptive_mass_dae.cpp) |
 | DIRK/BDF singular mass | V for tested consistent index-1/index-2 formulations and suitable methods; no singular mass inverse | [DAEs](../tests/test_implicit_mass_dae.cpp), [BDF DAEs](../tests/test_implicit_bdf_mass_dae.cpp), [mixed CH](../../../../source/nonlinear_operators/pde_validation/tests/test_cahn_hilliard.cpp) |
 | IMEX nonsingular mass | V: both partitions use the same mass/state convention and independent contexts | [mass](../tests/test_implicit_imex_mass.cpp) |
+| Reduced convex-split CH IMEX | V for concentration-only, constant mobility, periodic unforced double-well CH with IMEX_EULER; first order, mass conservation and energy dissipation; not general singular-mass IMEX | [formulation](../../../../source/nonlinear_operators/cahn_hilliard/README.md), [accuracy](../../../../source/nonlinear_operators/pde_validation/tests/test_cahn_hilliard_imex.cpp), [energy](../../../../source/nonlinear_operators/pde_validation/tests/test_cahn_hilliard_energy.cpp) |
 | General singular-mass IMEX | U: no general constrained partition-rate reconstruction | [execution limits](../README.md#partition-execution) |
 | Rosenbrock constant nonsingular mass | V: rate form or selected `mass_form`; exact Jacobian for ROS2/ROS3 | [mass](../tests/test_implicit_rosenbrock_mass.cpp), [time](../tests/test_implicit_rosenbrock_mass_nonautonomous.cpp) |
 | Rosenbrock variable nonsingular mass | V in normalized rate form, including DM and M_t terms; not physical variable-mass `mass_form` | [variable mass](../tests/test_implicit_rosenbrock_variable_mass.cpp) |
@@ -99,6 +100,6 @@ The project owns spatial discretization, PDE equations, solver assembly and
 periodic-orbit matching. Library stepping support does not establish prepared
 shooting derivatives. Project explicit/DIRK/BDF derivative evidence remains
 separate; IMEX/Rosenbrock prepared shooting derivatives are not claimed here.
-KS bifurcation references do not validate KS time integration. Full nonlinear CH,
-convex-split singular-mass IMEX, cavity Navier-Stokes and NLS remain separate
+KS bifurcation references do not validate KS time integration. Broader CH
+mobilities/boundaries, convex-split singular-mass IMEX, cavity Navier-Stokes and NLS remain separate
 problem-integration stages.
